@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
-// @namespace    dawn.mufy.export
+// @namespace    https://github.com/willwefind/mufy-batch-export
 // @version      1.6.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：合并成一份 Markdown，或每段对话一个文件打包成 ZIP
 // @author       Ciel
