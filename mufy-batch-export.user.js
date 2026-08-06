@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.6.0
+// @version      1.7.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：合并成一份 Markdown，或每段对话一个文件打包成 ZIP
 // @author       Ciel
 // @license      MIT
@@ -21,9 +21,9 @@
  *   2) 不想装插件：在 mufy 的聊天页面按 F12 打开控制台，把本文件整段粘进去回车，
  *      同样会出现那个按钮（关掉标签页就没了，下次再粘一遍）。
  *
- * 🔞 面向成年用户。请勿向未成年人传播本工具或站点地址。
- *
  * 只读你自己的账号数据，不发任何东西出去；导出文件直接走浏览器下载。
+ *
+ * 🔞 面向成年用户。请勿向未成年人传播本工具或站点地址。
  */
 
 (function () {
@@ -297,12 +297,15 @@
   }
 
   // ---------- 取数 ----------
-  async function getCharacterName(characterId) {
+  // ⚠️ 开场白在角色卡的 greeting 字段上，**不是 dialogs 里的一行**——
+  //    只导 dialogs 会把每个角色的第一幕整段漏掉（实测一个角色的 greeting 有 1400+ 字）。
+  //    注意这里拿到的是"当前"的开场白；卡主改过的话，旧 session 当年那版接口不提供。
+  async function getCharacter(characterId) {
     try {
       const d = await api('/api/characters/get?id=' + encodeURIComponent(characterId));
-      return d && d.name ? d.name : characterId.slice(0, 8);
+      return { name: (d && d.name) || characterId.slice(0, 8), greeting: (d && d.greeting) || '' };
     } catch (e) {
-      return characterId.slice(0, 8);
+      return { name: characterId.slice(0, 8), greeting: '' };
     }
   }
 
@@ -367,9 +370,9 @@
   // liveSessionId = 角色列表里的 lastSessionId，也就是这个角色"活着的"那段对话。
   // ⚠️ 只走存档列表会漏掉它：你聊过但从没按"保存"的对话，存档接口根本不列。
   //    实测在一个 200+ 角色的账号上，有 102 个角色属于这种情况，
-  //    合计 1356 条消息（最多的一个 112 条）曾被整段漏掉。
+//    合计 1356 条消息（最多的一个 112 条）曾被整段漏掉。
   async function collectCharacter(characterId, opts, report, limit, liveSessionId) {
-    const name = await getCharacterName(characterId);
+    const { name, greeting } = await getCharacter(characterId);
     report(`【${name}】读取存档列表…`);
     const archives = await getArchives(characterId);
 
@@ -440,7 +443,7 @@
     // 新的排前面
     kept.sort((a, b) => sessionTime(b) - sessionTime(a));
 
-    return { characterId, name, archiveCount: archives.length, sessions: kept, exportedAt: new Date().toISOString() };
+    return { characterId, name, greeting, archiveCount: archives.length, sessions: kept, exportedAt: new Date().toISOString() };
   }
 
   // 一段对话的代表时间：存档时间优先，否则用最后一条消息
@@ -533,6 +536,10 @@
     L.push(`- 导出时间：${new Date(pack.exportedAt).toLocaleString('zh-CN')}`);
     if (opts.tidy) L.push('- 已清理 `<think>` 与状态栏 HTML（完整原文请看 JSON）');
     L.push('', '---', '');
+    if (pack.greeting) {
+      const g = opts.tidy ? tidy(pack.greeting) : pack.greeting;
+      if (g.trim()) L.push('## 开场白', '', '> 角色卡自带，不属于任何一段对话', '', g, '', '---', '');
+    }
 
     pack.sessions.forEach((s, idx) => {
       L.push(`## ${String(idx + 1).padStart(2, '0')}. ${sessionTitle(s)}`);
@@ -555,7 +562,9 @@
 
     if (opts.split) {
       const used = new Set();
-      const files = pack.sessions.map((s, i) => {
+      // 章节：一段对话一篇。索引严格按 chapters 生成，别把开场白混进来数——
+      // 混进来就会整体错位一位，最后一项还会撞上 undefined。
+      const chapters = pack.sessions.map((s, i) => {
         const idx = String(i + 1).padStart(2, '0');
         const slug = fileSlug(s);
         let nm = `${idx}_${stamp(sessionTime(s))}${slug ? '_' + slug : ''}.md`;
@@ -564,12 +573,27 @@
         return { name: nm, text: toMarkdownOne(pack, s, i + 1, opts), date: sessionTime(s) };
       });
 
+      // 开场白单独成篇，排在最前面——它是角色卡自带的第一幕，不属于任何一段对话
+      const files = [];
+      const g = pack.greeting ? (opts.tidy ? tidy(pack.greeting) : pack.greeting) : '';
+      if (g.trim()) {
+        files.push({
+          name: '00_开场白.md',
+          text: `# ${pack.name} · 开场白\n\n` +
+                `- 角色卡自带的开场白，不属于任何一段对话\n` +
+                `- 抓的是导出当时的版本；卡主后来改过的话，早期对话当年看到的未必是这一版\n\n---\n\n${g}\n`,
+          date: new Date(pack.exportedAt),
+        });
+      }
+      files.push(...chapters);
+
       files.push({
         name: '00_目录.md',
         text:
           `# ${pack.name} · 共 ${pack.sessions.length} 段对话\n\n` +
           `导出时间：${new Date(pack.exportedAt).toLocaleString('zh-CN')}\n\n` +
-          files.map((f, i) => `${i + 1}. [${f.name}](${linkTarget(f.name)})　${pack.sessions[i].messageCount} 条`).join('\n') +
+          (g.trim() ? `0. [00_开场白.md](00_%E5%BC%80%E5%9C%BA%E7%99%BD.md)　角色卡自带\n` : '') +
+          chapters.map((f, i) => `${i + 1}. [${f.name}](${linkTarget(f.name)})　${pack.sessions[i].messageCount} 条`).join('\n') +
           '\n',
         date: new Date(pack.exportedAt),
       });
@@ -629,7 +653,7 @@
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.6</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.7</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
