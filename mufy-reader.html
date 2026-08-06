@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mufy 阅读器</title>
+<style>
+/* 「报纸」皮想用京華老宋体的话，把它的 ttf 改名成 kinghwa.ttf 放在本文件旁边即可。
+   本仓不附带字体（不代第三方字体做分发）；没有就自动退到思源宋 / 系统宋，功能不受影响。 */
+@font-face{
+  font-family:'KingHwaOldSong';
+  src:local('京華老宋体_KingHwa_OldSong'), local('京華老宋体'), url('kinghwa.ttf') format('truetype');
+  font-weight:200 400; font-display:swap;
+}
+:root{
+  --bg:#17120e; --bg2:#1f1811; --ink:#efe4d4; --dim:#c3b39a; --faint:#8b7d6b;
+  --glow:#e8a94e; --line:rgba(232,169,78,.16); --panel:rgba(31,24,17,.72);
+  --serif:"Noto Serif SC","Source Han Serif SC","STSong","SimSun",serif;
+  --fs:19px; --lh:2.0; --cw:720px;
+}
+:root[data-theme=day]{
+  --bg:#f4ece0; --bg2:#fbf6ee; --ink:#2e2621; --dim:#5f5346; --faint:#938473;
+  --glow:#a9712a; --line:rgba(169,113,42,.2); --panel:rgba(251,246,238,.8);
+}
+:root[data-theme=grey]{
+  --bg:#22242a; --bg2:#2a2d34; --ink:#dfe3e9; --dim:#aeb5bf; --faint:#7e8590;
+  --glow:#7fa6d0; --line:rgba(127,166,208,.18); --panel:rgba(42,45,52,.75);
+}
+/* 「小狗的灰色报纸」——取自她 SillyTavern 的嘎嘎灰美化 2.0 配色 */
+:root[data-theme=paper]{
+  --bg:#eaeae9; --bg2:#e6e6e6; --ink:#000; --dim:#4a4a4a; --faint:#8a8a8a;
+  --glow:#c7710c; --line:rgba(200,200,200,1); --panel:rgba(245,245,245,.94);
+  --serif:'KingHwaOldSong','京華老宋体',serif;
+  --quote:rgba(199,113,12,.81); --ital:rgba(185,32,11,.84); --under:rgba(19,72,121,.68);
+}
+/* 报纸皮：正文纸面 + 极淡纸纹，你的发言压深一档，角色的留白一档 */
+:root[data-theme=paper] body{
+  background-image:
+    radial-gradient(circle at 17% 23%, rgba(0,0,0,.022) 0 1px, transparent 1px),
+    radial-gradient(circle at 63% 71%, rgba(0,0,0,.018) 0 1px, transparent 1px),
+    radial-gradient(circle at 88% 41%, rgba(0,0,0,.02) 0 1px, transparent 1px);
+  background-size: 37px 37px, 53px 53px, 29px 29px;
+}
+:root[data-theme=paper] #page{background:rgba(255,255,255,.57);border-radius:2px}
+:root[data-theme=paper] .msg.ta{background:#f5f5f5;border:1px solid var(--line);
+  border-radius:3px;padding:18px 22px}
+:root[data-theme=paper] .msg.me .body{background:#e6e6e6;border-left:3px solid #b8b8b8;
+  padding:12px 16px;color:#333}
+:root[data-theme=paper] .body{font-weight:300}
+/* 报纸皮下让 RP 里的引号/破折号有颜色，像原来那套主题 */
+:root[data-theme=paper] .q{color:var(--quote)}
+:root[data-theme=paper] .i{color:var(--ital);font-style:italic}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--serif);
+     display:flex;overflow:hidden;transition:background .4s ease,color .4s ease}
+
+/* ── 侧栏 ── */
+#side{width:312px;flex:none;height:100%;display:flex;flex-direction:column;
+      background:var(--bg2);border-right:1px solid var(--line);transition:margin-left .3s ease}
+#side.hide{margin-left:-312px}
+#side header{padding:20px 18px 12px;border-bottom:1px solid var(--line)}
+#side h1{margin:0 0 3px;font-size:15px;font-weight:500;letter-spacing:.16em;color:var(--glow)}
+#side .sub{font-size:11.5px;color:var(--faint);letter-spacing:.08em}
+#pick{margin-top:13px;width:100%;padding:9px;border-radius:11px;cursor:pointer;font-family:inherit;
+      font-size:13px;background:rgba(232,169,78,.12);color:var(--ink);border:1px solid var(--line)}
+#pick:hover,#pick2:hover{background:rgba(232,169,78,.2)}
+#pick2{width:100%;padding:7px;border-radius:10px;cursor:pointer;font-family:inherit;
+       font-size:12px;background:transparent;color:var(--dim);border:1px solid var(--line)}
+#diag{margin-top:9px;font-size:11.5px;line-height:1.7;color:var(--faint)}
+#q{margin:12px 18px 0;padding:7px 11px;border-radius:10px;font-family:inherit;font-size:13px;
+   background:rgba(0,0,0,.16);color:var(--ink);border:1px solid var(--line);outline:none}
+:root[data-theme=day] #q{background:rgba(0,0,0,.05)}
+#list{flex:1;overflow-y:auto;padding:10px 10px 40px}
+.ch{padding:8px 10px;border-radius:9px;cursor:pointer;font-size:14px;color:var(--dim);
+    display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.ch:hover{background:rgba(232,169,78,.08);color:var(--ink)}
+.ch.on{background:rgba(232,169,78,.13);color:var(--glow)}
+.ch .n{font-size:11px;color:var(--faint);flex:none}
+.caps{padding:2px 0 8px 8px}
+.cap{padding:6px 10px 6px 16px;border-left:1px solid var(--line);margin-left:6px;
+     font-size:12.8px;color:var(--faint);cursor:pointer;line-height:1.55}
+.cap:hover{color:var(--ink)}
+.cap.on{color:var(--glow);border-left-color:var(--glow)}
+.cap .m{font-size:10.5px;opacity:.65;margin-left:6px}
+
+/* ── 正文 ── */
+#main{flex:1;height:100%;overflow-y:auto;position:relative;scroll-behavior:smooth}
+#bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;
+     padding:11px 22px;background:var(--panel);backdrop-filter:blur(16px);
+     border-bottom:1px solid var(--line);font-size:12.5px;color:var(--faint)}
+#bar .t{flex:1;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#bar button{background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px;
+            padding:4px 10px;font-family:inherit;font-size:12px;cursor:pointer}
+#bar button:hover{color:var(--glow);border-color:var(--glow)}
+#bar select{background:var(--bg2);color:var(--dim);border:1px solid var(--line);border-radius:8px;
+            padding:4px 6px;font-family:inherit;font-size:12px}
+#page{max-width:var(--cw);margin:0 auto;padding:52px 32px 140px}
+#page h2{font-size:23px;font-weight:500;letter-spacing:.05em;margin:0 0 6px;color:var(--ink)}
+#page .meta{font-size:12px;color:var(--faint);letter-spacing:.06em;margin-bottom:44px;
+            padding-bottom:18px;border-bottom:1px solid var(--line)}
+.msg{margin:0 0 34px}
+.who{font-size:11.5px;letter-spacing:.18em;color:var(--faint);margin-bottom:9px}
+.msg.me .who{color:var(--glow);opacity:.72}
+.body{font-size:var(--fs);line-height:var(--lh);white-space:pre-wrap;word-break:break-word}
+.msg.me .body{color:var(--dim);font-size:calc(var(--fs) - 1.5px);
+              border-left:2px solid var(--line);padding-left:18px}
+:root[data-hideme=1] .msg.me{display:none}
+#nav{max-width:var(--cw);margin:0 auto;padding:0 32px 90px;display:flex;gap:12px}
+#nav button{flex:1;padding:13px;border-radius:12px;cursor:pointer;font-family:inherit;font-size:13.5px;
+            background:rgba(232,169,78,.08);color:var(--dim);border:1px solid var(--line)}
+#nav button:hover:not(:disabled){color:var(--glow);border-color:var(--glow)}
+#nav button:disabled{opacity:.3;cursor:default}
+#empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       text-align:center;color:var(--faint);font-size:14px;line-height:2.1;padding:40px}
+#toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%);z-index:20;
+       background:var(--panel);backdrop-filter:blur(14px);border:1px solid var(--line);
+       border-radius:12px;padding:9px 18px;font-size:12.5px;color:var(--dim);
+       opacity:0;pointer-events:none;transition:opacity .3s}
+#toast.on{opacity:1}
+::-webkit-scrollbar{width:9px}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:9px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+
+<aside id="side">
+  <header>
+    <h1>MUFY 阅读器</h1>
+    <div class="sub">把导出的存档当小说翻</div>
+    <button id="pick">选择存档文件夹</button>
+    <button id="pick2" style="margin-top:7px">或直接选 zip 文件（可多选）</button>
+    <div id="diag"></div>
+    <input id="dir" type="file" webkitdirectory directory multiple hidden>
+    <input id="zips" type="file" accept=".zip,application/zip" multiple hidden>
+  </header>
+  <input id="q" placeholder="搜角色名…">
+  <div id="list"></div>
+</aside>
+
+<main id="main">
+  <div id="bar">
+    <button id="toggle" title="收起目录">☰</button>
+    <span class="t" id="title">还没打开任何存档</span>
+    <button data-fs="-1">A−</button>
+    <button data-fs="1">A+</button>
+    <select id="lh"><option value="1.8">行距紧</option><option value="2.0" selected>行距中</option><option value="2.3">行距松</option></select>
+    <select id="cw"><option value="620">窄</option><option value="720" selected>中</option><option value="880">宽</option></select>
+    <select id="ff">
+      <option value="'KingHwaOldSong','京華老宋体',serif" selected>京華老宋</option>
+      <option value='"Noto Serif SC","Source Han Serif SC","STSong","SimSun",serif'>思源宋</option>
+      <option value='"KaiTi","STKaiti","楷体",serif'>楷体</option>
+      <option value='"STSong","SimSun","宋体",serif'>宋体</option>
+      <option value='"Microsoft YaHei","微软雅黑",sans-serif'>雅黑</option>
+    </select>
+    <select id="th"><option value="paper" selected>报纸</option><option value="night">夜</option><option value="day">昼</option><option value="grey">灰</option></select>
+    <button id="hideme" title="RP 记录里你的发言常常是指令，藏起来更像读小说">隐藏我的发言</button>
+    <button id="hidesys" title="记忆区的「规则：…」「AI填充：…」是给模型看的脚手架，不是正文">已藏脚手架</button>
+  </div>
+
+  <div id="page"></div>
+  <div id="nav">
+    <button id="prev" disabled>← 上一章</button>
+    <button id="next" disabled>下一章 →</button>
+  </div>
+
+  <div id="empty">
+    点左上角「选择存档文件夹」<br>
+    选中你放导出 zip 的那个文件夹<br><br>
+    <span style="opacity:.7">
+    不用解压，它直接读 zip；一次只把一个角色读进内存。<br>
+    键盘 ← → 翻章，Esc 收起目录。<br><br>
+    ⚠️ 别选云盘目录（WPS／OneDrive）——里面是占位文件，浏览器读不到，<br>
+    会显示「一个 zip 都没有」。先把文件夹复制到本地硬盘。
+    </span>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+/* ══════════════════════════════════════════════════════════
+   ZIP 读取：只读需要的字节区间，不整包载入。
+   （导出脚本那边的 ZIP 是我自己按格式拼的，这里是它的逆运算。）
+   ══════════════════════════════════════════════════════════ */
+
+const td = new TextDecoder('utf-8');
+
+async function readSlice(file, start, len) {
+  return new Uint8Array(await file.slice(start, start + len).arrayBuffer());
+}
+const u16 = (b, o) => b[o] | (b[o + 1] << 8);
+const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+
+// 从尾部倒着找 EOCD（0x06054b50）
+async function centralDir(file) {
+  const tail = Math.min(file.size, 66000);
+  const b = await readSlice(file, file.size - tail, tail);
+  let p = -1;
+  for (let i = b.length - 22; i >= 0; i--) {
+    if (u32(b, i) === 0x06054b50) { p = i; break; }
+  }
+  if (p < 0) throw new Error('不是有效的 zip（找不到目录尾）');
+  const count = u16(b, p + 10), size = u32(b, p + 12), off = u32(b, p + 16);
+  const cd = await readSlice(file, off, size);
+  const entries = new Map();
+  let q = 0;
+  for (let i = 0; i < count; i++) {
+    if (u32(cd, q) !== 0x02014b50) break;
+    const method = u16(cd, q + 10);
+    const csize = u32(cd, q + 20), usize = u32(cd, q + 24);
+    const nLen = u16(cd, q + 28), eLen = u16(cd, q + 30), cLen = u16(cd, q + 32);
+    const local = u32(cd, q + 42);
+    const name = td.decode(cd.subarray(q + 46, q + 46 + nLen));
+    entries.set(name, { method, csize, usize, local });
+    q += 46 + nLen + eLen + cLen;
+  }
+  return entries;
+}
+
+async function readEntry(file, e) {
+  // 本地头长度不固定，得先读它的 nameLen / extraLen
+  const lh = await readSlice(file, e.local, 30);
+  if (u32(lh, 0) !== 0x04034b50) throw new Error('本地文件头损坏');
+  const dataAt = e.local + 30 + u16(lh, 26) + u16(lh, 28);
+  const raw = await readSlice(file, dataAt, e.csize);
+  if (e.method === 0) return td.decode(raw);
+  if (e.method !== 8) throw new Error('不支持的压缩方式 ' + e.method);
+  const ds = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return td.decode(new Uint8Array(await new Response(ds).arrayBuffer()));
+}
+
+/* ══════════════════════════════════════════════════════════
+   内容处理
+   ══════════════════════════════════════════════════════════ */
+
+function contentToText(c) {
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return c == null ? '' : JSON.stringify(c);
+  return c.map(p => {
+    if (p == null) return '';
+    if (typeof p === 'string') return p;
+    if (p.type === 'text' || typeof p.text === 'string') return p.text || '';
+    if (p.url) return '［图片］';
+    return '';
+  }).join('\n');
+}
+
+// 状态栏 HTML 和 think 块对「读小说」是噪音，读的时候清掉。
+// 注意：去掉标签之后还要收拾 HTML 缩进带出来的行首空白，
+// 否则状态栏那一块会在正文里裂出好几行空档。
+function tidy(t) {
+  return String(t)
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/^[ \t]+/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// 卡里给模型看的脚手架（记忆区规则、待填充占位）——读小说时是纯噪音。
+// 只删「明确是指令」的行，不碰剧情；关掉开关就能看到完整原文。
+function dropMachinery(t) {
+  return t.split('\n')
+    .filter(l => !/\[\s*(规则|AI\s*填充)\s*[:：]|待生成|【\s*规则\s*】/.test(l))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+const esc = s => String(s).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+
+/* ══════════════════════════════════════════════════════════
+   状态
+   ══════════════════════════════════════════════════════════ */
+
+const S = { chars: [], cur: -1, pack: null, cap: -1 };
+const $ = id => document.getElementById(id);
+
+function toast(msg, ms = 1800) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('on'), ms);
+}
+
+// mufy_角色名_20260807-0114.zip  /  mufy_角色名_1562d9_20260807-0114.zip
+function parseName(fn) {
+  const m = fn.match(/^mufy_(.+?)(?:_([0-9a-f]{6}))?_(\d{8}-\d{4})\.zip$/i);
+  if (!m) return { name: fn.replace(/\.zip$/i, ''), id: '', batch: '' };
+  return { name: m[1], id: m[2] || '', batch: m[3] };
+}
+
+$('pick').onclick = () => $('dir').click();
+$('pick2').onclick = () => $('zips').click();
+
+function accept(fileList) {
+  const all = [...fileList];
+  const zips = all.filter(f => /\.zip$/i.test(f.name));
+  // ⚠️ 云盘（WPS / OneDrive）里的文件是「占位文件」，浏览器枚举不到。
+  //    枚举总数和 zip 数都报出来，出问题时一眼看得见是哪一步丢的。
+  const d = $('diag');
+  if (!zips.length) {
+    d.textContent = all.length
+      ? `选中了 ${all.length} 个文件，但一个 zip 都没有。若这是云盘目录（WPS／OneDrive），
+         里面多半是占位文件，浏览器读不到——把文件夹复制到本地硬盘再选。`
+      : '一个文件都没读到。若这是云盘目录，请先复制到本地硬盘。';
+    toast('没读到 zip，看左侧说明', 4200);
+    return;
+  }
+  d.textContent = `已载入 ${zips.length} 个包` + (all.length > zips.length ? `（另跳过 ${all.length - zips.length} 个非 zip）` : '');
+  S.chars = zips.map(f => ({ file: f, ...parseName(f.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  S.cur = -1; S.pack = null; S.cap = -1;
+  renderList();
+  $('empty').style.display = 'none';
+  toast(`读到 ${S.chars.length} 个角色`);
+}
+
+$('dir').onchange = e => accept(e.target.files);
+$('zips').onchange = e => accept(e.target.files);
+
+function renderList() {
+  const kw = $('q').value.trim().toLowerCase();
+  const box = $('list'); box.innerHTML = '';
+  S.chars.forEach((c, i) => {
+    if (kw && !c.name.toLowerCase().includes(kw)) return;
+    const d = document.createElement('div');
+    d.className = 'ch' + (i === S.cur ? ' on' : '');
+    d.innerHTML = `<span>${esc(c.name)}${c.id ? ` <span class="n">#${c.id}</span>` : ''}</span>
+                   <span class="n">${(c.file.size / 1048576).toFixed(1)}M</span>`;
+    d.onclick = () => openChar(i);
+    box.appendChild(d);
+    if (i === S.cur && S.pack) {
+      const caps = document.createElement('div');
+      caps.className = 'caps';
+      S.pack.sessions.forEach((s, j) => {
+        const el = document.createElement('div');
+        el.className = 'cap' + (j === S.cap ? ' on' : '');
+        el.innerHTML = `${esc(capTitle(s, j))}<span class="m">${s.messageCount}条</span>`;
+        el.onclick = ev => { ev.stopPropagation(); openCap(j); };
+        caps.appendChild(el);
+      });
+      box.appendChild(caps);
+    }
+  });
+}
+$('q').oninput = renderList;
+
+function capTitle(s, j) {
+  if (s.isGreeting) return '开场白';
+  const remark = (s.archives || []).map(a => a.remark).filter(Boolean).join(' / ');
+  if (remark) return `${j + 1}. ${remark}`;
+  const first = (s.dialogs || []).find(m => m.role === 'assistant' && tidy(contentToText(m.content)));
+  if (first) {
+    const line = tidy(contentToText(first.content)).split('\n').find(x => x.trim()) || '';
+    const cut = line.replace(/^\s*\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}(?:[/\s]\d{1,2}[:：]\d{2})?\s*[•·・\-—|]*\s*/, '');
+    if (cut) return `${j + 1}. ${cut.slice(0, 22)}`;
+  }
+  return `${j + 1}. 第 ${j + 1} 段`;
+}
+
+async function openChar(i) {
+  const c = S.chars[i];
+  $('title').textContent = c.name + ' · 读取中…';
+  try {
+    const entries = await centralDir(c.file);
+    const key = [...entries.keys()].find(k => k === '_原始数据.json') ||
+                [...entries.keys()].find(k => k.endsWith('.json'));
+    if (!key) throw new Error('这个包里没有 _原始数据.json（可能是旧版导出）');
+    S.pack = JSON.parse(await readEntry(c.file, entries.get(key)));
+    // 开场白挂在角色卡上、不是对话行，导出时单独存了一份。
+    // 这里把它当成「第 0 章」插到最前面（旧版导出没有这个字段，不受影响）。
+    if (S.pack.greeting && String(S.pack.greeting).trim()) {
+      S.pack.sessions.unshift({
+        sessionId: '（角色卡自带）', isGreeting: true, archives: [], messageCount: 1,
+        dialogs: [{ role: 'assistant', content: [{ type: 'text', text: S.pack.greeting }] }],
+      });
+    }
+    S.cur = i; S.cap = -1;
+    renderList();
+    openCap(0);
+  } catch (err) {
+    $('title').textContent = c.name;
+    $('page').innerHTML = `<h2>打不开</h2><div class="meta">${esc(c.file.name)}</div>
+      <div class="body">${esc(err.message)}</div>`;
+    toast('打不开：' + err.message, 3200);
+  }
+}
+
+function openCap(j) {
+  const p = S.pack; if (!p || !p.sessions[j]) return;
+  S.cap = j;
+  const s = p.sessions[j];
+  $('title').textContent = `${p.name} · ${capTitle(s, j).replace(/^\d+\.\s*/, '')}`;
+
+  const when = s.isGreeting
+    ? '角色卡自带，不属于任何一段对话'
+    : (s.archives && s.archives.length
+        ? new Date(s.archives[0].createdAt).toLocaleString('zh-CN')
+        : '未存档的最后一段');
+  const parts = [
+    `<h2>${esc(capTitle(s, j).replace(/^\d+\.\s*/, ''))}</h2>`,
+    `<div class="meta">${esc(p.name)}　·　第 ${j + 1} / ${p.sessions.length} 段　·　${s.messageCount} 条　·　${esc(when)}</div>`
+  ];
+  const hideSys = root.dataset.hidesys !== '0';   // 默认藏起脚手架
+  for (const m of s.dialogs || []) {
+    let body = tidy(contentToText(m.content));
+    if (hideSys) body = dropMachinery(body);
+    if (!body) continue;
+    const me = m.role === 'user';
+    const t = m.createdTime ? new Date(m.createdTime).toLocaleString('zh-CN') : '';
+    parts.push(`<div class="msg ${me ? 'me' : 'ta'}">
+      <div class="who">${me ? '我' : esc(p.name)}　${t}</div>
+      <div class="body">${esc(body)}</div></div>`);
+  }
+  $('page').innerHTML = parts.join('');
+  $('prev').disabled = j <= 0;
+  $('next').disabled = j >= p.sessions.length - 1;
+  $('main').scrollTop = 0;
+  renderList();
+  localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, cap: j }));
+}
+
+$('prev').onclick = () => openCap(S.cap - 1);
+$('next').onclick = () => openCap(S.cap + 1);
+
+/* ── 阅读设置 ── */
+const root = document.documentElement;
+let fs = 19;
+document.querySelectorAll('[data-fs]').forEach(b => b.onclick = () => {
+  fs = Math.max(14, Math.min(30, fs + (+b.dataset.fs)));
+  root.style.setProperty('--fs', fs + 'px'); save();
+});
+$('lh').onchange = e => { root.style.setProperty('--lh', e.target.value); save(); };
+$('cw').onchange = e => { root.style.setProperty('--cw', e.target.value + 'px'); save(); };
+$('ff').onchange = e => { root.style.setProperty('--serif', e.target.value); save(); };
+$('th').onchange = e => { root.dataset.theme = e.target.value; save(); };
+$('hideme').onclick = () => {
+  root.dataset.hideme = root.dataset.hideme === '1' ? '' : '1';
+  $('hideme').textContent = root.dataset.hideme === '1' ? '显示我的发言' : '隐藏我的发言';
+  save();
+};
+$('hidesys').onclick = () => {
+  root.dataset.hidesys = root.dataset.hidesys === '0' ? '1' : '0';
+  $('hidesys').textContent = root.dataset.hidesys === '0' ? '显示脚手架' : '已藏脚手架';
+  save();
+  if (S.cap >= 0) openCap(S.cap);
+};
+$('toggle').onclick = () => $('side').classList.toggle('hide');
+
+function save() {
+  localStorage.setItem('mufyReader.prefs', JSON.stringify({
+    fs, lh: $('lh').value, cw: $('cw').value, ff: $('ff').value,
+    th: $('th').value, hideme: root.dataset.hideme || '',
+    hidesys: root.dataset.hidesys || '1'
+  }));
+}
+(function load() {
+  try {
+    const p = JSON.parse(localStorage.getItem('mufyReader.prefs') || '{}');
+    if (p.fs) { fs = p.fs; root.style.setProperty('--fs', fs + 'px'); }
+    if (p.lh) { $('lh').value = p.lh; root.style.setProperty('--lh', p.lh); }
+    if (p.cw) { $('cw').value = p.cw; root.style.setProperty('--cw', p.cw + 'px'); }
+    if (p.ff) { $('ff').value = p.ff; root.style.setProperty('--serif', p.ff); }
+    if (p.th) { $('th').value = p.th; root.dataset.theme = p.th; }
+    if (p.hideme) { root.dataset.hideme = '1'; $('hideme').textContent = '显示我的发言'; }
+    if (p.hidesys === '0') { root.dataset.hidesys = '0'; $('hidesys').textContent = '显示脚手架'; }
+  } catch (e) {}
+})();
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'ArrowRight' && !$('next').disabled) openCap(S.cap + 1);
+  if (e.key === 'ArrowLeft' && !$('prev').disabled) openCap(S.cap - 1);
+  if (e.key === 'Escape') $('side').classList.toggle('hide');
+});
+</script>
+</body>
+</html>
