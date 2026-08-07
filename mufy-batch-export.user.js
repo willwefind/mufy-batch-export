@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.19.0
+// @version      1.20.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -1375,8 +1375,18 @@ ${ncxpts.join('\n')}
   async function emit(pack, opts, ts, report) {
     // 重名角色真的存在（同一个名字下挂着两个不同的 characterId，实测遇到过好几对）。
     // 不加区分的话两个包会撞名，靠浏览器补 " (1)"，事后根本分不出谁是谁。
-    const dup = opts.dupNames && opts.dupNames.has(pack.name);
-    const base = `mufy_${safeName(pack.name)}${dup ? '_' + pack.characterId.slice(0, 6) : ''}_${ts}`;
+    // 比对的是规整之后的名字（和上面数重名时用的是同一把尺子）
+    const safe = safeName(pack.name);
+    const dup = opts.dupNames && opts.dupNames.has(safe);
+    let stem = `${safe}${dup ? '_' + pack.characterId.slice(0, 6) : ''}`;
+    // 兜底：万一预扫没算到（比如列表里的名字和角色卡上的名字不一致），
+    // 运行期再挡一道，绝不让两个角色写出同一个文件名。
+    if (opts.usedStems) {
+      if (opts.usedStems.has(stem)) stem = `${safe}_${pack.characterId.slice(0, 6)}`;
+      while (opts.usedStems.has(stem)) stem += '_';
+      opts.usedStems.add(stem);
+    }
+    const base = `mufy_${stem}_${ts}`;
 
     if (opts.shape === 'epub') {
       // 书名就是文件名，不加 mufy_ 前缀也不加时间戳 —— 导进图书类 App 之后，
@@ -1384,7 +1394,7 @@ ${ncxpts.join('\n')}
       report(`【${pack.name}】做成电子书…`);
       const r = await buildEpub(pack, (n) => drawCover(pack.name, `${n} 章`));
       if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return; }
-      downloadBlob(`${safeName(pack.name)}${dup ? '_' + pack.characterId.slice(0, 6) : ''}.epub`, r.blob);
+      downloadBlob(`${stem}.epub`, r.blob);
       report(`  ${r.chapters} 章 / ${r.total} 条　${(r.blob.size / 1048576).toFixed(2)} MB`);
       return;
     }
@@ -1535,7 +1545,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.19</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.20</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1712,9 +1722,15 @@ ${ncxpts.join('\n')}
         const skipped = chars.length - usable.length;
         if (skipped) report(`${chars.length} 个里有 ${skipped} 个从没聊过（无存档），跳过。`);
 
-        // 先数一遍重名，撞名的在文件名里补 characterId 前六位
+        // 先数一遍撞名的，在文件名里补 characterId 前六位。
+        // 🔴 **必须按「最终文件名」数，不能按原始角色名数**：
+        //    safeName 会把 / : * ? " < > | 换成 _、把连续空白压成一个、再截到 60 字，
+        //    两个不同的角色名完全可能被规整成同一个文件名（「夜色/温柔」和「夜色:温柔」）。
+        //    按原名数会认为它们不重复 → 两个包同名 → 浏览器把后到的存成「xxx (1)」，
+        //    谁拿到正名取决于下载先后 → 用户看到的就是「文件名是 A 卡、点进去是 B 卡」。
+        //    （真有用户这么报过。和面具那次「层级降级判错字符串」是同一类错。）
         const counts = new Map();
-        for (const c of usable) counts.set(c.name, (counts.get(c.name) || 0) + 1);
+        for (const c of usable) { const k = safeName(c.name); counts.set(k, (counts.get(k) || 0) + 1); }
         opts.dupNames = new Set([...counts].filter(([, n]) => n > 1).map(([nm]) => nm));
         if (opts.dupNames.size) report(`有 ${opts.dupNames.size} 个重名角色，文件名会补角色 ID 区分。`);
 
@@ -1747,6 +1763,7 @@ ${ncxpts.join('\n')}
 
       // 单个角色失败不许拖垮整批：几百个角色跑到第 180 个才炸，前面 179 个不能白跑。
       // 但登录态断了是例外 —— 那不是"这个角色的问题"，继续跑只会刷几百条同样的错。
+      opts.usedStems = new Set(); // 运行期文件名占用表，防两个角色写出同名文件
       const failed = [];
       let okCount = 0;
       let emptyCount = 0;
