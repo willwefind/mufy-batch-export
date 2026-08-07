@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.12.0
+// @version      1.13.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -520,7 +520,7 @@
   //
   // 为什么有这条路（官方明明有「导出引继码」）：那份 XML 把**小剧场**和**全局美化**
   // 整段 AES 加密了（base64 解开是 {salt,iv,ciphertext}），正文其余部分倒是明文、
-  // 且与接口逐字一致（四张真卡逐字段 SHA-256 比对过）。可那两块加起来常常七万字以上，
+  // 且与接口逐字一致（拿真实自制卡逐字段 SHA-256 比对过）。可那两块往往是整张卡里最长的部分，
   // 是卡主自己写的东西，在官方文件里自己读不了；图片也只有链接。
   // 我们不碰它的加密——**接口本来就给明文**，直接落地即可。
 
@@ -1375,7 +1375,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.12</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.13</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1533,7 +1533,8 @@ ${ncxpts.join('\n')}
         opts.dupNames = new Set([...counts].filter(([, n]) => n > 1).map(([nm]) => nm));
         if (opts.dupNames.size) report(`有 ${opts.dupNames.size} 个重名角色，文件名会补角色 ID 区分。`);
 
-        ids = usable.filter((c) => c.characterId).map((c) => ({ id: c.characterId, live: c.lastSessionId }));
+        // name 带上，失败清单里才报得出人名，不然只剩一串 UUID
+        ids = usable.filter((c) => c.characterId).map((c) => ({ id: c.characterId, live: c.lastSessionId, name: c.name }));
         if (!ids.length) throw new Error('没有可导出的角色。');
         const unit = shape === 'epub' ? '一本电子书' : shape === 'one' ? '一份 Markdown' : '一个压缩包';
         if (!confirm(`要导出 ${ids.length} 个角色，每个角色${unit}，会跑很久。继续吗？`)) {
@@ -1542,18 +1543,49 @@ ${ncxpts.join('\n')}
       }
 
       const ts = stamp();
+
+      // 单个角色失败不许拖垮整批：几百个角色跑到第 180 个才炸，前面 179 个不能白跑。
+      // 但登录态断了是例外 —— 那不是"这个角色的问题"，继续跑只会刷几百条同样的错。
+      const failed = [];
+      let okCount = 0;
+      let emptyCount = 0;
+
       for (const t of ids) {
-        const pack = await collectCharacter(t.id, opts, report, null, t.live);
-        if (!pack.sessions.length) { report(`【${pack.name}】没有可导出的对话，跳过。`); continue; }
-        await emit(pack, opts, ts, report);
-        const msgs = pack.sessions.reduce((n, s) => n + s.messageCount, 0);
-        report(`✅ 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
+        try {
+          const pack = await collectCharacter(t.id, opts, report, null, t.live);
+          if (!pack.sessions.length) {
+            report(`【${pack.name}】没有可导出的对话，跳过。`);
+            emptyCount += 1;
+          } else {
+            await emit(pack, opts, ts, report);
+            const msgs = pack.sessions.reduce((n, s) => n + s.messageCount, 0);
+            report(`✅ 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
+            okCount += 1;
+          }
+        } catch (e) {
+          if (/续不上登录态/.test(e.message)) throw e; // 掉登录，整批停下来才对
+          failed.push({ id: t.id, name: t.name || t.id, msg: e.message });
+          report(`❌ 【${t.name || t.id}】失败：${e.message}`);
+          report('   已跳过，继续下一个。');
+        }
         await sleep(400);
       }
+
       // 不完整必须在结尾再喊一次 —— 中间那行 ⚠️ 早被后面几百行冲走了
       if (opts.incompleteCount) {
         report(`🔴 有 ${opts.incompleteCount} 段没导完整（见各自文件开头的红字）。`);
         report('   多半是网络抖动。把对应角色单独重导一次通常就好了。');
+      }
+
+      // 结尾的账要算清楚：成功几个、空的几个、失败几个，失败的是谁
+      const tally = `成功 ${okCount} 个` + (emptyCount ? `，无对话跳过 ${emptyCount} 个` : '') +
+        (failed.length ? `，失败 ${failed.length} 个` : '');
+      if (failed.length) {
+        report(`🔴 ${tally}。失败的是：`);
+        for (const f of failed) report(`   · ${f.name}　${f.id}`);
+        report('   可以用「手动填角色 ID」把这几个单独补一遍。');
+      } else {
+        report(tally + '。');
       }
       report('全部完成。文件在浏览器的下载目录里。');
     } catch (e) {
