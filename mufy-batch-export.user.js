@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.11.0
-// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库导出来
+// @version      1.12.0
+// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
 // @homepageURL  https://github.com/willwefind/mufy-batch-export
@@ -506,6 +506,210 @@
     const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
     downloadBlob(base + '.zip', zip);
     report(`✅ ${masks.length} 个面具已打包，ZIP 大小 ${(zip.size / 1048576).toFixed(2)} MB`);
+  }
+
+  // ---------- 角色卡（你自己创建的那些） ----------
+  // 和面具一样是账号级的东西，但有三个坑，都是实测踩出来的：
+  //
+  //  1. **作者视角的完整卡片只在 POST /api/characters/metadata（body {id}）里。**
+  //     GET /api/characters/get 是读者视角：人设、情节设定、输出设定、样例对话、正则
+  //     一概没有，只有 45 个展示用字段。拿错接口会以为卡是空的。
+  //  2. **「逆境处理」不在扁平字段里**，藏在 charaPromptJson.single.charaRole.adversityPrompt。
+  //     多角色卡走 charaPromptJson.multi（数组）。
+  //  3. **图片只有 URL**（cdn.mufy.ai），真要留底得自己去抓。实测那个 CDN 放行跨域。
+  //
+  // 为什么有这条路（官方明明有「导出引继码」）：那份 XML 把**小剧场**和**全局美化**
+  // 整段 AES 加密了（base64 解开是 {salt,iv,ciphertext}），正文其余部分倒是明文、
+  // 且与接口逐字一致（四张真卡逐字段 SHA-256 比对过）。可那两块加起来常常七万字以上，
+  // 是卡主自己写的东西，在官方文件里自己读不了；图片也只有链接。
+  // 我们不碰它的加密——**接口本来就给明文**，直接落地即可。
+
+  const CARD_FIELDS = [
+    ['description', '角色介绍'],
+    ['charaPrompt', '人设'],
+    ['__adversity', '逆境处理'],
+    ['greeting', '开场设计'],
+    ['codeRenderContent', '小剧场'],
+    ['optimizationCode', '全局美化'],
+    ['plotSetting', '情节设定'],
+    ['outputSetting', '输出设定'],
+    ['styleSamples', '样例对话与文风'],
+    ['worldLore', '资料库'],
+    ['items', '物品栏'],
+    ['defaultMaskDescription', '默认认知'],
+    ['__chef', '厨子の厨艺分享'],
+  ];
+
+  async function getMyCards(report) {
+    const me = await api('/api/users/current');
+    const uid = me && (me.userId || me.id);
+    if (!uid) throw new Error('取不到你的用户 ID，请刷新 mufy 页面再试。');
+    const rows = await api('/api/characters/list?creatorId=' + encodeURIComponent(uid));
+    const list = Array.isArray(rows) ? rows : (rows && (rows.data || rows.list)) || [];
+    if (report) report(`你创建了 ${list.length} 张角色卡。`);
+
+    const out = [];
+    for (const c of list) {
+      if (!c.characterId) continue;
+      report(`【${c.name}】读取完整卡片…`);
+      out.push({ characterId: c.characterId, name: c.name, meta: await api('/api/characters/metadata', { id: c.characterId }) });
+      await sleep(150);
+    }
+    return out;
+  }
+
+  // charaPromptJson 里的分角色信息。单角色卡在 single.charaRole，多角色卡在 multi[]。
+  function cardRoles(meta) {
+    const j = meta && meta.charaPromptJson;
+    if (!j) return [];
+    if (Array.isArray(j.multi) && j.multi.length) return j.multi;
+    if (j.single && j.single.charaRole) return [j.single.charaRole];
+    return [];
+  }
+
+  function cardAdversity(meta) {
+    return cardRoles(meta)
+      .map((r) => String((r && r.adversityPrompt) || '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  // 值可能是字符串，也可能是数组/对象（资料库、物品栏）。对象一律按 JSON 落，别拍扁。
+  function cardValue(v) {
+    if (v == null) return '';
+    if (typeof v === 'string') return v.trim();
+    if (Array.isArray(v) && !v.length) return '';
+    if (typeof v === 'object') {
+      const s = JSON.stringify(v, null, 2);
+      return s === '{}' || s === '[]' || s === '{\n  "items": []\n}' ? '' : '```json\n' + s + '\n```';
+    }
+    return String(v);
+  }
+
+  function cardToMarkdown(card, exportedAt, level) {
+    const m = card.meta || {};
+    const h1 = '#'.repeat(level || 1);
+    const h2 = '#'.repeat((level || 1) + 1);
+    const h3 = '#'.repeat((level || 1) + 2);
+    const yn = (b) => (b ? '是' : '否');
+
+    let out =
+      `${h1} ${card.name}\n\n` +
+      `- 角色 ID：${card.characterId}\n` +
+      `- 性别：${m.genderText || m.gender}　年龄：${m.age}\n` +
+      `- NSFW：${yn(m.isNsfw)}　OC：${yn(m.isOc)}　AI 生成：${yn(m.isAi)}\n` +
+      (m.tags && m.tags.length ? `- 标签：${m.tags.join('、')}\n` : '') +
+      `- 导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n`;
+
+    // 图片：抓下来了就写文件名，没抓下来照实说，并留下原链接
+    for (const im of card.images || []) {
+      out += im.file
+        ? `- ${im.label}：\`${im.file}\`（已随包保存）\n`
+        : `- ${im.label}：**没抓下来**（${im.error}）　原链接：${im.url}\n`;
+    }
+    out += '\n---\n';
+
+    for (const [k, label] of CARD_FIELDS) {
+      const v =
+        k === '__adversity' ? cardAdversity(m)
+        : k === '__chef' ? [String(m.creatorDescriptionTitle || '').trim(), String(m.creatorDescription || '').trim()].filter(Boolean).join('\n')
+        : cardValue(m[k]);
+      out += `\n${h2} ${label}\n\n${v || '（空）'}\n`;
+    }
+
+    // 正则条目：一条一小节，别挤成一坨 JSON
+    const rules = Array.isArray(m.regexRules) ? m.regexRules : [];
+    out += `\n${h2} 正则条目（${rules.length} 条）\n`;
+    if (!rules.length) out += '\n（空）\n';
+    rules.forEach((r, i) => {
+      out +=
+        `\n${h3} ${i + 1}. ${r.ruleName || '(未命名)'}\n\n` +
+        `- 启用：${yn(r.enabled)}　可见：${yn(r.visibility)}　模式：${r.mode}\n` +
+        (r.targetSymbol ? `- 作用对象：${r.targetSymbol}\n` : '') +
+        `\n**匹配**\n\n\`\`\`\n${r.regPattern || r.regexPattern || ''}\n\`\`\`\n` +
+        `\n**替换为**\n\n\`\`\`\n${r.replaceString || ''}\n\`\`\`\n`;
+    });
+
+    return out;
+  }
+
+  // 图片走 cdn.mufy.ai。抓不到不算致命，记下来继续——但绝不静默跳过。
+  async function fetchCardImages(card, report) {
+    const m = card.meta || {};
+    const want = [['头像', m.avatarUrl], ['封面', m.backgroundUrl]];
+    const out = [];
+    for (const [label, url] of want) {
+      if (!url) continue;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        const ext = (blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+        out.push({ label, url, file: `${label}.${ext}`, bytes: new Uint8Array(await blob.arrayBuffer()) });
+      } catch (e) {
+        report(`  ⚠️ 【${card.name}】${label}没抓下来：${e.message}`);
+        out.push({ label, url, error: e.message });
+      }
+    }
+    return out;
+  }
+
+  async function emitCards(cards, opts, ts, report) {
+    const exportedAt = new Date().toISOString();
+    const base = `mufy_角色卡_${cards.length}张_${ts}`;
+
+    if (!opts.split) {
+      // 合并模式不带图片（图是二进制，塞不进一份 md）
+      const text =
+        `# 我创建的角色卡 · 共 ${cards.length} 张\n\n` +
+        `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n\n` +
+        `> 这份不含图片。要图请改用「每张卡一个文件夹（打包成 ZIP）」。\n` +
+        cards.map((c) => '\n---\n\n' + cardToMarkdown(c, exportedAt, 2)).join('');
+      download(base + '.md', text);
+      if (opts.json) download(base + '.json', JSON.stringify({ exportedAt, count: cards.length, cards: cards.map((c) => ({ characterId: c.characterId, name: c.name, meta: c.meta })) }, null, 2));
+      report(`✅ 已合并导出 ${cards.length} 张角色卡（不含图片）`);
+      return;
+    }
+
+    const files = [];
+    const usedDir = new Set();
+    const dirs = [];
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      let dir = `${String(i + 1).padStart(2, '0')}_${safeName(cut(c.name, 40))}`;
+      while (usedDir.has(dir)) dir += '_';
+      usedDir.add(dir);
+      dirs.push(dir);
+
+      report(`【${c.name}】抓图片…`);
+      c.images = await fetchCardImages(c, report);
+
+      files.push({ name: `${dir}/卡片.md`, text: cardToMarkdown(c, exportedAt, 1), date: new Date(exportedAt) });
+      if (opts.json) {
+        files.push({ name: `${dir}/卡片.json`, text: JSON.stringify({ characterId: c.characterId, name: c.name, meta: c.meta }, null, 2), date: new Date(exportedAt) });
+      }
+      for (const im of c.images) {
+        if (im.bytes) files.push({ name: `${dir}/${im.file}`, bytes: im.bytes, date: new Date(exportedAt), store: true });
+      }
+    }
+
+    const missing = cards.reduce((n, c) => n + (c.images || []).filter((x) => !x.file).length, 0);
+    files.unshift({
+      name: '00_目录.md',
+      text:
+        `# 我创建的角色卡 · 共 ${cards.length} 张\n\n` +
+        `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n\n` +
+        cards.map((c, i) => `${i + 1}. [${dirs[i]}/卡片.md](${linkTarget(dirs[i])}/%E5%8D%A1%E7%89%87.md)　${c.name}`).join('\n') +
+        '\n\n> 「小剧场」和「全局美化」在官方的引继码 XML 里是加密的，这里是明文。\n' +
+        (missing ? `\n> ⚠️ 有 ${missing} 张图片没抓下来，见各自卡片开头的红字。\n` : ''),
+      date: new Date(exportedAt),
+    });
+
+    report(`打包 ${files.length} 个文件…`);
+    const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+    downloadBlob(base + '.zip', zip);
+    report(`✅ ${cards.length} 张角色卡已打包，ZIP 大小 ${(zip.size / 1048576).toFixed(2)} MB`);
+    if (missing) report(`🔴 有 ${missing} 张图片没抓下来（卡片开头有记）。`);
   }
 
   // ---------- 组装一个角色的导出内容 ----------
@@ -1171,7 +1375,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.11</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.12</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1179,11 +1383,17 @@ ${ncxpts.join('\n')}
           <option value="followed">全部已关注角色（慢，含没聊过的）</option>
           <option value="manual">手动填角色 ID</option>
           <option value="masks">人设面具（全部，不是聊天记录）</option>
+          <option value="cards">我创建的角色卡（全部）</option>
         </select>
       </label>
       <div id="mufyx-masktip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
         导的是「人设面具」库，和聊天记录无关。<br>
         每个面具一份，按 备注／名称／性别／我的描述／我的喜好／指令 分好节。
+      </div>
+      <div id="mufyx-cardtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        导的是你自己创建的角色卡，一张一个文件夹：人设／小剧场／全局美化／情节设定／
+        输出设定／样例对话／正则条目等全字段明文，<b>头像和封面图真下下来</b>。<br>
+        官方「引继码」XML 把小剧场和全局美化加密了，这里是明文。
       </div>
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
@@ -1196,7 +1406,7 @@ ${ncxpts.join('\n')}
         </select>
       </label>
       <div id="mufyx-tidytip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
-        面具是纯文本设定，「清理 think」对它没有作用。
+        这一条导的不是对话，「清理 think」对它没有作用。
       </div>
       <div id="mufyx-epubtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
         直接出电子书，不用装 Python。导进微信读书 / 图书 / 静读天下就能当小说翻。<br>
@@ -1217,20 +1427,30 @@ ${ncxpts.join('\n')}
     // 「清理 think」也无从谈起（面具本来就是纯文本设定）。
     // 这两项不静默忽略，而是当场改掉界面说明白 —— 静默忽略等于骗人。
     const syncUI = () => {
-      const isMask = $('mufyx-scope').value === 'masks';
+      const scope = $('mufyx-scope').value;
+      const isMask = scope === 'masks';
+      const isCard = scope === 'cards';
+      const other = isMask || isCard; // 这两条都不是聊天记录
       const shapeSel = $('mufyx-shape');
       const epubOpt = shapeSel.querySelector('option[value=epub]');
 
-      $('mufyx-idwrap').style.display = $('mufyx-scope').value === 'manual' ? 'block' : 'none';
+      $('mufyx-idwrap').style.display = scope === 'manual' ? 'block' : 'none';
       $('mufyx-masktip').style.display = isMask ? 'block' : 'none';
-      $('mufyx-tidytip').style.display = isMask ? 'block' : 'none';
+      $('mufyx-cardtip').style.display = isCard ? 'block' : 'none';
+      $('mufyx-tidytip').style.display = other ? 'block' : 'none';
 
-      epubOpt.disabled = isMask;
-      epubOpt.textContent = isMask ? '每个角色一本电子书（EPUB · 面具不适用）' : '每个角色一本电子书（EPUB）';
-      if (isMask && shapeSel.value === 'epub') shapeSel.value = 'split';
+      epubOpt.disabled = other;
+      epubOpt.textContent = other
+        ? `每个角色一本电子书（EPUB · ${isMask ? '面具' : '角色卡'}不适用）`
+        : '每个角色一本电子书（EPUB）';
+      if (other && shapeSel.value === 'epub') shapeSel.value = 'split';
 
       shapeSel.querySelector('option[value=split]').textContent =
-        isMask ? '每个面具一个文件（打包成 ZIP）' : '每段对话一个文件（打包成 ZIP）';
+        isMask ? '每个面具一个文件（打包成 ZIP）'
+        : isCard ? '每张卡一个文件夹（打包成 ZIP，含图片）'
+        : '每段对话一个文件（打包成 ZIP）';
+      shapeSel.querySelector('option[value=one]').textContent =
+        isCard ? '全部合并成一份 Markdown（不含图片）' : '全部合并成一份 Markdown';
 
       $('mufyx-epubtip').style.display = shapeSel.value === 'epub' ? 'block' : 'none';
     };
@@ -1266,6 +1486,16 @@ ${ncxpts.join('\n')}
       report('确认登录态…');
       await ensureToken();
       report('登录态 OK');
+
+      // 角色卡也是账号级的，走自己的路
+      if (scope === 'cards') {
+        report('读取你创建的角色卡…');
+        const cards = await getMyCards(report);
+        if (!cards.length) throw new Error('没找到你创建的角色卡。');
+        await emitCards(cards, opts, stamp(), report);
+        report('全部完成。文件在浏览器的下载目录里。');
+        return;
+      }
 
       // 面具是账号级的一份清单，不挂角色，走自己的路，走完就结束
       if (scope === 'masks') {
@@ -1338,6 +1568,7 @@ ${ncxpts.join('\n')}
     open, collectCharacter, toMarkdown, toMarkdownOne, emit,
     getArchives, getDialogs, getCharacterList, hasChatted,
     getMasks, maskToMarkdown, emitMasks, maskTitle,
+    getMyCards, cardToMarkdown, emitCards, cardRoles, cardAdversity, fetchCardImages,
     ensureToken, refreshToken, api, makeZip,
     // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
     // 挂出来就能拿真实存档在浏览器/Node 里直接验，不用真的连账号。
