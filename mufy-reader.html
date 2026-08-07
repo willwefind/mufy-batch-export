@@ -234,6 +234,51 @@ async function readEntry(file, e) {
 }
 
 /* ══════════════════════════════════════════════════════════
+   缓存：把解析结果存进 IndexedDB，第二次打开就不用再选文件。
+   存的是压缩后的 JSON，体量和 zip 差不多（百来 MB 量级）。
+   ══════════════════════════════════════════════════════════ */
+
+const DB_NAME = 'mufyReader', DB_VER = 1;
+let _db = null;
+
+function idb() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, DB_VER);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('packs')) d.createObjectStore('packs');
+    };
+    r.onsuccess = () => { _db = r.result; res(_db); };
+    r.onerror = () => rej(r.error);
+  });
+}
+
+function idbDo(store, mode, fn) {
+  return idb().then(d => new Promise((res, rej) => {
+    const tx = d.transaction(store, mode);
+    const rq = fn(tx.objectStore(store));
+    tx.oncomplete = () => res(rq && rq.result);
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+
+const idbGet = (s, k) => idbDo(s, 'readonly', o => o.get(k));
+const idbPut = (s, k, v) => idbDo(s, 'readwrite', o => o.put(v, k));
+const idbKeys = (s) => idbDo(s, 'readonly', o => o.getAllKeys());
+const idbClear = (s) => idbDo(s, 'readwrite', o => o.clear());
+
+async function zipText(t) {
+  const s = new Blob([t]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+async function unzipText(b) {
+  const s = new Blob([b]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return td.decode(new Uint8Array(await new Response(s).arrayBuffer()));
+}
+
+/* ══════════════════════════════════════════════════════════
    内容处理
    ══════════════════════════════════════════════════════════ */
 
@@ -314,12 +359,72 @@ function accept(fileList) {
     return;
   }
   d.textContent = `已载入 ${zips.length} 个包` + (all.length > zips.length ? `（另跳过 ${all.length - zips.length} 个非 zip）` : '');
-  S.chars = zips.map(f => ({ file: f, ...parseName(f.name) }))
+  S.chars = zips.map(f => ({ file: f, key: f.name, ...parseName(f.name) }))
     .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
   S.cur = -1; S.pack = null; S.cap = -1;
   renderList();
   $('empty').style.display = 'none';
   toast(`读到 ${S.chars.length} 个角色`);
+  buildCache();          // 存一份进浏览器，下次开就不用再选文件
+}
+
+/* 一个一个来，绝不并发——这台机器被并发烤过一次。 */
+async function buildCache() {
+  const d = $('diag');
+  let done = 0, bytes = 0, fail = 0;
+  for (const c of S.chars) {
+    try {
+      const entries = await centralDir(c.file);
+      const key = [...entries.keys()].find(k => k === '_原始数据.json')
+               || [...entries.keys()].find(k => k.endsWith('.json'));
+      if (!key) { fail++; continue; }
+      const json = await readEntry(c.file, entries.get(key));
+      const packed = await zipText(json);
+      await idbPut('packs', c.key, packed);
+      bytes += packed.length;
+      done++;
+    } catch (e) { fail++; }
+    if (done % 3 === 0 || done === S.chars.length) {
+      d.textContent = `缓存中 ${done}/${S.chars.length}　${(bytes / 1048576).toFixed(0)} MB`;
+      await new Promise(r => setTimeout(r, 0));   // 让出主线程，界面不卡
+    }
+  }
+  await idbPut('kv', 'index', S.chars.map(c => ({
+    key: c.key, name: c.name, id: c.id, batch: c.batch, size: c.file.size,
+  })));
+  await idbPut('kv', 'savedAt', Date.now());
+  d.innerHTML = `已缓存 ${done} 个角色　${(bytes / 1048576).toFixed(0)} MB`
+    + (fail ? `（${fail} 个失败）` : '')
+    + `<br><span id="clearcache" style="cursor:pointer;text-decoration:underline">清除缓存</span>`;
+  const cc = $('clearcache');
+  if (cc) cc.onclick = async () => {
+    await idbClear('packs'); await idbClear('kv');
+    d.textContent = '缓存已清除，下次打开需要重新选文件夹。';
+    toast('缓存已清除');
+  };
+}
+
+/* 开机：能从缓存起就从缓存起，一个文件都不用选 */
+async function bootFromCache() {
+  try {
+    const idx = await idbGet('kv', 'index');
+    if (!idx || !idx.length) return false;
+    S.chars = idx.map(c => ({ ...c, file: null, cached: true }));
+    const keys = await idbKeys('packs');
+    renderList();
+    $('empty').style.display = 'none';
+    const at = await idbGet('kv', 'savedAt');
+    $('diag').innerHTML = `从缓存载入 ${S.chars.length} 个角色`
+      + (at ? `　<span style="opacity:.7">${new Date(at).toLocaleDateString('zh-CN')}</span>` : '')
+      + `<br><span id="clearcache" style="cursor:pointer;text-decoration:underline">清除缓存</span>`;
+    const cc = $('clearcache');
+    if (cc) cc.onclick = async () => {
+      await idbClear('packs'); await idbClear('kv');
+      location.reload();
+    };
+    toast(`从缓存载入 ${keys.length} 个角色，不用选文件`);
+    return true;
+  } catch (e) { return false; }
 }
 
 $('dir').onchange = e => accept(e.target.files);
@@ -333,7 +438,7 @@ function renderList() {
     const d = document.createElement('div');
     d.className = 'ch' + (i === S.cur ? ' on' : '');
     d.innerHTML = `<span>${esc(c.name)}${c.id ? ` <span class="n">#${c.id}</span>` : ''}</span>
-                   <span class="n">${(c.file.size / 1048576).toFixed(1)}M</span>`;
+                   <span class="n">${(((c.file && c.file.size) || c.size || 0) / 1048576).toFixed(1)}M</span>`;
     d.onclick = () => openChar(i);
     box.appendChild(d);
     if (i === S.cur && S.pack) {
@@ -369,11 +474,21 @@ async function openChar(i) {
   const c = S.chars[i];
   $('title').textContent = c.name + ' · 读取中…';
   try {
-    const entries = await centralDir(c.file);
-    const key = [...entries.keys()].find(k => k === '_原始数据.json') ||
-                [...entries.keys()].find(k => k.endsWith('.json'));
-    if (!key) throw new Error('这个包里没有 _原始数据.json（可能是旧版导出）');
-    S.pack = JSON.parse(await readEntry(c.file, entries.get(key)));
+    let json = null;
+    // 缓存优先：有缓存就不碰文件，没缓存再回去读 zip
+    const cached = await idbGet('packs', c.key).catch(() => null);
+    if (cached) {
+      json = await unzipText(cached);
+    } else if (c.file) {
+      const entries = await centralDir(c.file);
+      const key = [...entries.keys()].find(k => k === '_原始数据.json') ||
+                  [...entries.keys()].find(k => k.endsWith('.json'));
+      if (!key) throw new Error('这个包里没有 _原始数据.json（可能是旧版导出）');
+      json = await readEntry(c.file, entries.get(key));
+    } else {
+      throw new Error('这个角色不在缓存里，也没选到对应的 zip。请重新选一次文件夹。');
+    }
+    S.pack = JSON.parse(json);
     // 开场白挂在角色卡上、不是对话行，导出时单独存了一份。
     // 这里把它当成「第 0 章」插到最前面（旧版导出没有这个字段，不受影响）。
     if (S.pack.greeting && String(S.pack.greeting).trim()) {
@@ -387,7 +502,7 @@ async function openChar(i) {
     openCap(0);
   } catch (err) {
     $('title').textContent = c.name;
-    $('page').innerHTML = `<h2>打不开</h2><div class="meta">${esc(c.file.name)}</div>
+    $('page').innerHTML = `<h2>打不开</h2><div class="meta">${esc(c.key || c.name)}</div>
       <div class="body">${esc(err.message)}</div>`;
     toast('打不开：' + err.message, 3200);
   }
@@ -472,6 +587,7 @@ function save() {
     if (p.hideme) { root.dataset.hideme = '1'; $('hideme').textContent = '显示我的发言'; }
     if (p.hidesys === '0') { root.dataset.hidesys = '0'; $('hidesys').textContent = '显示脚手架'; }
   } catch (e) {}
+  bootFromCache();     // 有缓存就直接开，不用选文件
 })();
 
 document.addEventListener('keydown', e => {
