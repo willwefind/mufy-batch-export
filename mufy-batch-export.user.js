@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.17.0
+// @version      1.19.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -106,6 +106,15 @@
         await sleep(1200 * (i + 1));
         continue;
       }
+      if (res.status === 403) {
+        // 403 不是「没登录」（那是 401），是「认得你但这次不让过」。
+        // 实际见过的两类：①站点前面的防护（Cloudflare 之类）把请求当成机器人——
+        // 连太快、开了加速器/代理、网络环境异常都可能触发；②这个资源你的账号确实没权限。
+        throw new Error(
+          short(path) + ' → HTTP 403（被拒绝）。常见原因：① 站点的防护把请求当成了机器人' +
+          '（关掉加速器/VPN、换个网络、等几分钟再试）；② 这个角色或资源你的账号没有权限看。'
+        );
+      }
       if (!res.ok) throw new Error(short(path) + ' → HTTP ' + res.status);
 
       const json = await res.json();
@@ -196,6 +205,38 @@
       box.appendChild(a);
     }
   }
+
+  // ---------- 别让屏幕熄 ----------
+  // 手机上导一批角色要跑很久，中途息屏 / 切后台，系统就会把这个标签页回收掉，
+  // 导出当场断（有安卓用户反馈「息屏几次之后直接被踢出去，下载好的也没了」）。
+  // Wake Lock 能挡住「屏幕自动熄灭」，但**挡不住用户手动锁屏或切走**——
+  // 那两种情况下锁会被系统自动释放，所以回到前台时要重新申请。
+  let wakeLock = null;
+
+  async function acquireWakeLock(report) {
+    if (!navigator.wakeLock) {
+      if (report) report('  （这个浏览器不支持「保持屏幕常亮」，导出期间请别让屏幕熄。）');
+      return;
+    }
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+      if (report) report('  已请求保持屏幕常亮，导出期间别切到别的 App。');
+    } catch (e) {
+      // 页面不可见时申请会抛，不是致命问题，别打断导出
+      if (report) report(`  （没能保持屏幕常亮：${e.message}。请别让屏幕熄。）`);
+    }
+  }
+
+  function releaseWakeLock() {
+    try { if (wakeLock) wakeLock.release(); } catch (e) {}
+    wakeLock = null;
+  }
+
+  // 回到前台就补回来（息屏/切走的时候系统已经把它释放了）
+  const onVisibleReacquire = () => {
+    if (document.visibilityState === 'visible' && !wakeLock) acquireWakeLock(null);
+  };
 
   function downloadBlob(filename, blob) {
     const url = URL.createObjectURL(blob);
@@ -1494,7 +1535,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.17</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.19</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1517,6 +1558,14 @@ ${ncxpts.join('\n')}
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
+      <label id="mufyx-startwrap" style="display:none">从第几个角色开始（中断后接着跑用）
+        <input type="number" id="mufyx-start" min="1" step="1" value="1">
+      </label>
+      <div id="mufyx-starttip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        导到一半被打断（手机上常见）不用从头来：看日志里最后成功的是第几个，
+        下次填它的下一个。<br>
+        ⚠️ 顺序按「最近聊过」排，<b>中途别去聊天</b>，不然编号会变。
+      </div>
       <label>输出方式
         <select id="mufyx-shape">
           <option value="split">每段对话一个文件（打包成 ZIP）</option>
@@ -1556,6 +1605,10 @@ ${ncxpts.join('\n')}
       const epubOpt = shapeSel.querySelector('option[value=epub]');
 
       $('mufyx-idwrap').style.display = scope === 'manual' ? 'block' : 'none';
+      // 「从第 N 个开始」只对成批跑的两个范围有意义（单个角色、面具、角色卡都不需要）
+      const batch = scope === 'chatted' || scope === 'followed';
+      $('mufyx-startwrap').style.display = batch ? 'block' : 'none';
+      $('mufyx-starttip').style.display = batch ? 'block' : 'none';
       $('mufyx-masktip').style.display = isMask ? 'block' : 'none';
       $('mufyx-cardtip').style.display = isCard ? 'block' : 'none';
       $('mufyx-tidytip').style.display = other ? 'block' : 'none';
@@ -1603,6 +1656,12 @@ ${ncxpts.join('\n')}
 
     goBtn.disabled = true;
     lines.length = 0;
+
+    // 导出期间别让屏幕熄。有安卓用户反馈「导全部角色时息屏几次之后就直接被踢出去了」——
+    // 手机息屏/切后台之后系统会回收标签页，导出当场断。
+    // Wake Lock 只在页面可见时有效，息屏或切走会自动释放，所以回到前台要重新申请。
+    await acquireWakeLock(report);
+    document.addEventListener('visibilitychange', onVisibleReacquire);
 
     try {
       report('确认登录态…');
@@ -1670,13 +1729,31 @@ ${ncxpts.join('\n')}
 
       const ts = stamp();
 
+      // 「从第 N 个开始」：手机上导几百个角色，中途被系统回收是常事，
+      // 不该逼人从头再来一遍。编号就是下面日志里打的那个序号。
+      const totalIds = ids.length;
+      let startAt = 1;
+      if (scope === 'chatted' || scope === 'followed') {
+        startAt = Math.max(1, parseInt($('mufyx-start').value, 10) || 1);
+        if (startAt > totalIds) {
+          throw new Error(`「从第 ${startAt} 个开始」超出范围：这次一共只有 ${totalIds} 个角色。`);
+        }
+        if (startAt > 1) {
+          ids = ids.slice(startAt - 1);
+          report(`共 ${totalIds} 个，从第 ${startAt} 个开始 → 本次要导 ${ids.length} 个。`);
+          report('   （顺序按「最近聊过」排，中途去聊天会让编号变化。）');
+        }
+      }
+
       // 单个角色失败不许拖垮整批：几百个角色跑到第 180 个才炸，前面 179 个不能白跑。
       // 但登录态断了是例外 —— 那不是"这个角色的问题"，继续跑只会刷几百条同样的错。
       const failed = [];
       let okCount = 0;
       let emptyCount = 0;
+      let seq = startAt - 1; // 打给人看的序号，和「从第 N 个开始」是同一套编号
 
       for (const t of ids) {
+        seq += 1;
         try {
           const pack = await collectCharacter(t.id, opts, report, null, t.live);
           if (!pack.sessions.length) {
@@ -1685,13 +1762,13 @@ ${ncxpts.join('\n')}
           } else {
             await emit(pack, opts, ts, report);
             const msgs = pack.sessions.reduce((n, s) => n + s.messageCount, 0);
-            report(`✅ 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
+            report(`✅ [${seq}/${totalIds}] 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
             okCount += 1;
           }
         } catch (e) {
           if (/续不上登录态/.test(e.message)) throw e; // 掉登录，整批停下来才对
           failed.push({ id: t.id, name: t.name || t.id, msg: e.message });
-          report(`❌ 【${t.name || t.id}】失败：${e.message}`);
+          report(`❌ [${seq}/${totalIds}] 【${t.name || t.id}】失败：${e.message}`);
           report('   已跳过，继续下一个。');
         }
         await sleep(400);
@@ -1713,11 +1790,16 @@ ${ncxpts.join('\n')}
       } else {
         report(tally + '。');
       }
+      if (seq < totalIds) {
+        report(`⏸ 只跑到第 ${seq} 个（共 ${totalIds} 个）。下次把「从第几个角色开始」填 ${seq + 1}。`);
+      }
       report('全部完成。文件在浏览器的下载目录里。');
     } catch (e) {
       report('❌ ' + e.message);
     } finally {
       goBtn.disabled = false;
+      document.removeEventListener('visibilitychange', onVisibleReacquire);
+      releaseWakeLock();
     }
   }
 
