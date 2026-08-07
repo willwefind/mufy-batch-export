@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.14.0
+// @version      1.15.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -472,20 +472,38 @@
     ['command', '指令'],
   ];
 
+  // 返回 { list, total, truncated }：
+  // total 是接口自己报的总数。有用户反馈**未订阅的账号只能导出现有的几个面具，
+  // 其余的拿不到**——那是 mufy 那边的可见性限制，不是这里少翻了页。
+  // 但「接口说有 N 个、实际只拿到 M 个」这件事必须喊出来：
+  // 闷声导出更少的东西，比导不出来更糟（v1.8 那个静默吞数据的坑就是这么来的）。
   async function getMasks(report) {
-    const out = [];
+    const list = [];
+    let total = null;
     let page = 1;
+    let truncated = false;
     for (;;) {
       const d = await api('/api/masks/query', { page, pageSize: 100 });
       const rows = (d && d.data) || [];
-      out.push(...rows);
-      if (report && d && d.total) report(`  已读 ${out.length}/${d.total}`);
+      if (d && typeof d.total === 'number') total = d.total;
+      list.push(...rows);
+      if (report && total) report(`  已读 ${list.length}/${total}`);
       if (!rows.length || d.hasNext === false) break;
       page += 1;
-      if (page > 60) break; // 兜底，别让分页出岔子时空转
+      if (page > 60) { truncated = true; break; } // 兜底，别让分页出岔子时空转
       await sleep(120);
     }
-    return out;
+    return { list, total, truncated };
+  }
+
+  // 少拿到了就说清楚，并且这句话要能进文件，不能只活在会滚走的日志里
+  function maskShortfallNote(count, total, truncated) {
+    if (truncated) return `翻页翻到上限还没结束，只取回 ${count} 个，可能不全。`;
+    if (total && count < total) {
+      return `接口说这个账号共有 ${total} 个面具，实际只取回 ${count} 个，少了 ${total - count} 个。` +
+        `多半是 mufy 对未订阅账号限制了可见数量——导出只能拿到你现在看得见的那些，脚本没有办法绕过。`;
+    }
+    return '';
   }
 
   // 面具标题：备注是列表里显示的那一行，最认得出来；备注为空才退到名称
@@ -544,6 +562,7 @@
       `# 人设面具 · 共 ${masks.length} 个\n\n` +
       `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n\n` +
       `顺序与 mufy 面具库里的一致。\n\n` +
+      (opts.maskNote ? `> 🔴 **${opts.maskNote}**\n\n` : '') +
       masks
         .map((m, i) => {
           const nm = String(m.maskName || '').trim();
@@ -1444,7 +1463,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.14</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.15</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1572,9 +1591,13 @@ ${ncxpts.join('\n')}
       // 面具是账号级的一份清单，不挂角色，走自己的路，走完就结束
       if (scope === 'masks') {
         report('读取人设面具库…');
-        const masks = await getMasks(report);
+        const got = await getMasks(report);
+        const masks = got.list;
         if (!masks.length) throw new Error('面具库是空的（或者接口没返回内容）。');
         report(`共 ${masks.length} 个面具。`);
+        // 少拿到了要当场喊，而且这句话得跟着进文件——只写日志会被后面几百行冲走
+        opts.maskNote = maskShortfallNote(masks.length, got.total, got.truncated);
+        if (opts.maskNote) report('🔴 ' + opts.maskNote);
         await emitMasks(masks, opts, stamp(), report);
         report('全部完成。文件在浏览器的下载目录里。');
         return;
