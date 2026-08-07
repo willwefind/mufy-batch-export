@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.9.0
-// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：合并成一份 Markdown，或每段对话一个文件打包成 ZIP
+// @version      1.10.0
+// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书
 // @author       Ciel
 // @license      MIT
 // @homepageURL  https://github.com/willwefind/mufy-batch-export
@@ -194,8 +194,10 @@
     };
   }
 
-  // files: [{ name, text, date }]
-  async function makeZip(files, onProgress) {
+  // files: [{ name, text | bytes, date, store }]
+  //   bytes = 已经是 Uint8Array 的二进制（封面 PNG 走这条）
+  //   store = 强制不压缩。EPUB 的 mimetype 必须是第一个条目且不压缩，否则很多阅读器不认。
+  async function makeZip(files, onProgress, mime) {
     const enc = new TextEncoder();
     const parts = [];
     const central = [];
@@ -204,14 +206,16 @@
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       const nameBytes = enc.encode(f.name);
-      const raw = enc.encode(f.text);
+      const raw = f.bytes ? f.bytes : enc.encode(f.text);
       const crc = crc32(raw);
       const { date, time } = dosDT(f.date);
 
       let method = 0;
       let body = raw;
-      const packed = await deflateRaw(raw);
-      if (packed && packed.length < raw.length) { method = 8; body = packed; }
+      if (!f.store) {
+        const packed = await deflateRaw(raw);
+        if (packed && packed.length < raw.length) { method = 8; body = packed; }
+      }
 
       const lh = new Uint8Array(30 + nameBytes.length);
       const dv = new DataView(lh.buffer);
@@ -265,7 +269,7 @@
     dv.setUint32(12, cdSize, true);
     dv.setUint32(16, offset, true);
 
-    return new Blob([...parts, ...cd, eocd], { type: 'application/zip' });
+    return new Blob([...parts, ...cd, eocd], { type: mime || 'application/zip' });
   }
 
   // ---------- 内容处理 ----------
@@ -585,12 +589,330 @@
     return L.join('\n');
   }
 
+  // ---------- EPUB（电子书） ----------
+  // 这一整段是 make-epub.py 的逐行移植：EPUB 说到底就是一个结构固定的 ZIP，
+  // 上面已经有 ZIP 了，所以浏览器里能直接出书 —— 不用装 Python，手机上也能导。
+  // ⚠️ 改这里的任何一条判据，请连 make-epub.py 一起改，否则两边出的书会不一样。
+
+  // 和 Python 版同一套清洗：EPUB 是 XHTML，标签必须全部拆掉再转义，不能留半个。
+  function stripTags(t) {
+    return String(t)
+      .replace(/<think>[\s\S]*?<\/think>/g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/[ \t]+$/gm, '')
+      .replace(/^[ \t]+/gm, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  // 卡里给模型看的脚手架，读小说时是纯噪音。只删明确是指令的行。
+  function dropMachinery(t) {
+    const keep = String(t).split('\n').filter(
+      (l) => !/\[\s*(规则|AI\s*填充)\s*[:：]|待生成|【\s*规则\s*】/.test(l)
+    );
+    return keep.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // 书里放不了远端图片（离线就是个叉），和 Python 版一样只留一个占位
+  function contentToTextEpub(c) {
+    if (typeof c === 'string') return c;
+    if (!Array.isArray(c)) return c == null ? '' : JSON.stringify(c);
+    const out = [];
+    for (const p of c) {
+      if (p == null) continue;
+      if (typeof p === 'string') out.push(p);
+      else if (p.type === 'text' || typeof p.text === 'string') out.push(p.text || '');
+      else if (p.url) out.push('［图片］');
+    }
+    return out.join('\n');
+  }
+
+  // html.escape(quote=False) 的等价物。& 必须第一个换，否则会把后面换出来的 &lt; 再吃一遍。
+  const escXml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // 按「字符」截断，不是按码元。
+  // ⚠️ 上面那个 cut() 是按 UTF-16 码元截的（为了不把 emoji 劈成两半），
+  //    但 emoji / 花体字一个字符占两个码元，所以同样写 28，cut() 只截到 14 个字。
+  //    真实存档里有 3 个角色的标题因此和 Python 版对不上（'𝑒𝓇 𝒹𝑒𝒶𝒹' 这种）。
+  //    展开成数组再切是按码点走的，和 Python 的 s[:n] 同义，也照样不会劈开代理对。
+  const cutChars = (s, n) => [...String(s)].slice(0, n).join('');
+
+  // 章节标题：存档备注优先，否则拿助手第一句（砍掉剧情内时间抬头）
+  function chapterTitleEpub(s, i) {
+    const remark = (s.archives || []).map((a) => a.remark).filter(Boolean).join(' / ');
+    if (remark) return remark;
+    for (const m of (s.dialogs || [])) {
+      if (m.role !== 'assistant') continue;
+      const body = stripTags(contentToTextEpub(m.content));
+      let line = body.split('\n').map((x) => x.trim()).find(Boolean) || '';
+      if (!line) continue;
+      line = line.replace(/^\s*\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}(?:[/\s]\d{1,2}[:：]\d{2})?\s*[•·・\-—|]*\s*/, '');
+      if (line) return cutChars(line, 28);
+    }
+    return `第 ${i} 段`;
+  }
+
+  // 必须是合法 UUID 格式。早先 Python 版拿 sha1 十六进制串直接冒充，epubcheck 报 OPF-085。
+  // uuid5 既确定（同一个角色永远同一个 id，重导不会变成"另一本书"），格式又合规。
+  // 这里刻意和 Python 用同一个命名空间和同一句 'mufy:'+id —— 两边出的书 ID 必须一模一样。
+  const UUID_NS_URL = [0x6b,0xa7,0xb8,0x11,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8];
+
+  async function uuid5(name) {
+    const nb = new TextEncoder().encode(name);
+    const buf = new Uint8Array(UUID_NS_URL.length + nb.length);
+    buf.set(UUID_NS_URL, 0);
+    buf.set(nb, UUID_NS_URL.length);
+    let h;
+    try {
+      h = new Uint8Array(await crypto.subtle.digest('SHA-1', buf));
+    } catch (e) {
+      // crypto.subtle 只在 https / localhost 下有。退到一个确定性的凑数散列：
+      // 格式仍然合规、同一角色仍然稳定，只是和 Python 版对不上号。
+      h = new Uint8Array(20);
+      let a = 0x811c9dc5;
+      for (let i = 0; i < buf.length; i++) { a = (a ^ buf[i]) >>> 0; a = Math.imul(a, 0x01000193) >>> 0; h[i % 20] ^= (a >>> ((i % 4) * 8)) & 0xff; }
+    }
+    h[6] = (h[6] & 0x0f) | 0x50;   // 版本 5
+    h[8] = (h[8] & 0x3f) | 0x80;   // 变体
+    const hex = [...h.slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+  }
+
+  const EPUB_CSS = `@charset "utf-8";
+body { font-family: serif; line-height: 1.85; margin: 0 6%; text-align: justify;
+       -webkit-hyphens: none; hyphens: none; }
+h1 { font-size: 1.35em; font-weight: normal; line-height: 1.5; margin: 2.2em 0 .3em;
+     text-align: left; }
+.meta { font-size: .78em; color: #777; margin: 0 0 2.4em; padding-bottom: .8em;
+        border-bottom: 1px solid #ddd; }
+.note { font-size: .82em; color: #777; margin: 0 0 2em; }
+.who { font-size: .72em; color: #999; letter-spacing: .12em; margin: 1.8em 0 .35em; }
+p { margin: 0 0 .85em; text-indent: 0; }
+.me { color: #555; font-size: .93em; border-left: 3px solid #ddd;
+      padding-left: .9em; margin-left: 0; }
+.me .who { color: #a06a20; }
+`;
+
+  const EPUB_CONTAINER = `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+`;
+
+  function paraHtml(text, cls) {
+    return String(text).split('\n').filter((b) => b.trim())
+      .map((b) => `<p${cls ? ` class="${cls}"` : ''}>${escXml(b)}</p>`).join('\n');
+  }
+
+  function chapterXhtml(title, meta, bodyHtml) {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">
+<head><meta charset="utf-8"/><title>${escXml(title)}</title>
+<link rel="stylesheet" type="text/css" href="../style.css"/></head>
+<body>
+<h1>${escXml(title)}</h1>
+${meta ? `<p class="meta">${escXml(meta)}</p>` : ''}
+${bodyHtml}
+</body></html>
+`;
+  }
+
+  // 封面：竖排书名，和 Python 版同一套版式，只是画笔从 PIL 换成 canvas。
+  // 字体用系统 serif（手机上就是自带的宋体/思源宋），所以不用带任何字体文件。
+  function drawCover(name, subtitle) {
+    return new Promise((resolve) => {
+      try {
+        const W = 1200, H = 1600;
+        const cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        const g = cv.getContext('2d');
+        if (!g) return resolve(null);
+        g.fillStyle = '#f7f5f1'; g.fillRect(0, 0, W, H);
+        g.textBaseline = 'top';   // PIL 的 text() 是左上角对齐，canvas 默认是基线
+
+        g.fillStyle = '#111111';
+        g.font = '116px serif';
+        let x = W - 200, y = 210, col = 0;
+        for (const ch of cutChars(name, 24)) {   // 同上：按字符不按码元
+          g.fillText(ch, x - col * 140, y);
+          y += 132;
+          if (y > H - 520) { y = 210; col += 1; }
+        }
+
+        g.strokeStyle = '#111111'; g.lineWidth = 3;
+        g.beginPath(); g.moveTo(150, H - 380); g.lineTo(270, H - 380); g.stroke();
+
+        g.fillStyle = '#6c6862'; g.font = '38px serif';
+        g.fillText(subtitle, 150, H - 340);
+        g.fillStyle = '#96928c'; g.font = '30px serif';
+        g.fillText('mufy 存档', 150, H - 250);
+
+        cv.toBlob(async (b) => {
+          if (!b) return resolve(null);
+          try { resolve(new Uint8Array(await b.arrayBuffer())); } catch (e) { resolve(null); }
+        }, 'image/png');
+      } catch (e) {
+        resolve(null);   // 封面画不出来不该拖垮整本书
+      }
+    });
+  }
+
+  // pack → EPUB Blob。没有一章能成书就返回 null。
+  // coverFn(章数) → Promise<Uint8Array|null>：封面得等章数点清楚了才画（副标题上写着章数），
+  // 所以这里收的是个回调而不是现成的图。传 null 就是不要封面。
+  async function buildEpub(pack, coverFn) {
+    const name = pack.name || '未命名';
+    const cid = pack.characterId || '';
+    const uid = 'urn:uuid:' + (await uuid5('mufy:' + (cid || name)));
+    const sessions = pack.sessions || [];
+
+    const chapters = [];   // { file, title, xhtml }
+
+    const g = dropMachinery(stripTags(pack.greeting || ''));
+    if (g) {
+      chapters.push({
+        file: 'ch000.xhtml', title: '开场白',
+        xhtml: chapterXhtml('开场白', '角色卡自带，不属于任何一段对话', paraHtml(g)),
+      });
+    }
+
+    sessions.forEach((s, n) => {
+      const i = n + 1;
+      const title = chapterTitleEpub(s, i);
+      const arch = s.archives || [];
+      const when = arch.length ? String(arch[0].createdAt || '').slice(0, 10) : '未存档的最后一段';
+      const parts = [];
+      for (const m of (s.dialogs || [])) {
+        const body = dropMachinery(stripTags(contentToTextEpub(m.content)));
+        if (!body) continue;
+        const me = m.role === 'user';
+        parts.push(`<div class="${me ? 'me' : 'ta'}">`
+          + `<p class="who">${escXml(me ? '我' : name)}</p>`
+          + `${paraHtml(body)}</div>`);
+      }
+      if (!parts.length) return;
+      const meta = `第 ${i} / ${sessions.length} 段　·　${s.messageCount || 0} 条　·　${when}`;
+      chapters.push({
+        file: `ch${String(i).padStart(3, '0')}.xhtml`, title,
+        xhtml: chapterXhtml(title, meta, parts.join('\n')),
+      });
+    });
+
+    if (!chapters.length) return null;
+
+    const coverBytes = coverFn ? await coverFn(chapters.length) : null;
+
+    const manifest = [], spine = [], navlis = [], ncxpts = [];
+    if (coverBytes) {
+      manifest.push('<item id="cover-img" href="images/cover.png" media-type="image/png" properties="cover-image"/>');
+      manifest.push('<item id="cover" href="text/cover.xhtml" media-type="application/xhtml+xml"/>');
+      // 别标 linear="no"：那样封面就成了"非线性内容"，规范要求必须有页面链接到它，
+      // 否则 epubcheck 报 OPF-096。封面放进阅读顺序第一页最省事，阅读器也都这么认。
+      spine.push('<itemref idref="cover"/>');
+    }
+    chapters.forEach((c, k) => {
+      const n = k + 1;
+      manifest.push(`<item id="c${n}" href="text/${c.file}" media-type="application/xhtml+xml"/>`);
+      spine.push(`<itemref idref="c${n}"/>`);
+      navlis.push(`<li><a href="text/${c.file}">${escXml(c.title)}</a></li>`);
+      ncxpts.push(`<navPoint id="n${n}" playOrder="${n}"><navLabel><text>${escXml(c.title)}</text></navLabel>`
+        + `<content src="text/${c.file}"/></navPoint>`);
+    });
+
+    const total = sessions.reduce((n, s) => n + (s.messageCount || 0), 0);
+    const modified = String(pack.exportedAt || '2026-01-01T00:00:00Z').slice(0, 19) + 'Z';
+
+    const opf = `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="zh-CN">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">${uid}</dc:identifier>
+    <dc:title>${escXml(name)}</dc:title>
+    <dc:creator>mufy 存档</dc:creator>
+    <dc:language>zh-CN</dc:language>
+    <dc:description>${escXml(`${chapters.length} 章，${total} 条消息。由 mufy-batch-export 导出。`)}</dc:description>
+    <meta property="dcterms:modified">${modified}</meta>
+    ${coverBytes ? '<meta name="cover" content="cover-img"/>' : ''}
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="css" href="style.css" media-type="text/css"/>
+${manifest.map((m) => '    ' + m).join('\n')}
+  </manifest>
+  <spine toc="ncx">
+${spine.map((s) => '    ' + s).join('\n')}
+  </spine>
+</package>
+`;
+
+    const nav = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">
+<head><meta charset="utf-8"/><title>目录</title></head>
+<body><nav epub:type="toc" id="toc"><h1>目录</h1><ol>
+${navlis.join('\n')}
+</ol></nav></body></html>
+`;
+
+    const ncx = `<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="zh-CN">
+  <head><meta name="dtb:uid" content="${uid}"/></head>
+  <docTitle><text>${escXml(name)}</text></docTitle>
+  <navMap>
+${ncxpts.join('\n')}
+  </navMap>
+</ncx>
+`;
+
+    const when = new Date(pack.exportedAt || Date.now());
+    const F = (n, text) => ({ name: n, text, date: when });
+    const files = [
+      // ⚠️ mimetype 必须是第一个条目、且不压缩
+      { name: 'mimetype', text: 'application/epub+zip', date: when, store: true },
+      F('META-INF/container.xml', EPUB_CONTAINER),
+      F('OEBPS/content.opf', opf),
+      F('OEBPS/nav.xhtml', nav),
+      F('OEBPS/toc.ncx', ncx),
+      F('OEBPS/style.css', EPUB_CSS),
+    ];
+    if (coverBytes) {
+      files.push({ name: 'OEBPS/images/cover.png', bytes: coverBytes, date: when });
+      files.push(F('OEBPS/text/cover.xhtml',
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n'
+        + '<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-CN"><head>'
+        + '<meta charset="utf-8"/><title>封面</title></head><body style="margin:0">'
+        + '<img src="../images/cover.png" alt="封面" style="width:100%"/>'
+        + '</body></html>'));
+    }
+    for (const c of chapters) files.push(F(`OEBPS/text/${c.file}`, c.xhtml));
+
+    const blob = await makeZip(files, null, 'application/epub+zip');
+    return { blob, chapters: chapters.length, total };
+  }
+
   // ---------- 落盘 ----------
   async function emit(pack, opts, ts, report) {
     // 重名角色真的存在（同一个名字下挂着两个不同的 characterId，实测遇到过好几对）。
     // 不加区分的话两个包会撞名，靠浏览器补 " (1)"，事后根本分不出谁是谁。
     const dup = opts.dupNames && opts.dupNames.has(pack.name);
     const base = `mufy_${safeName(pack.name)}${dup ? '_' + pack.characterId.slice(0, 6) : ''}_${ts}`;
+
+    if (opts.shape === 'epub') {
+      // 书名就是文件名，不加 mufy_ 前缀也不加时间戳 —— 导进图书类 App 之后，
+      // 书架上显示的就是这一行，让它干干净净的。
+      report(`【${pack.name}】做成电子书…`);
+      const r = await buildEpub(pack, (n) => drawCover(pack.name, `${n} 章`));
+      if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return; }
+      downloadBlob(`${safeName(pack.name)}${dup ? '_' + pack.characterId.slice(0, 6) : ''}.epub`, r.blob);
+      report(`  ${r.chapters} 章 / ${r.total} 条　${(r.blob.size / 1048576).toFixed(2)} MB`);
+      return;
+    }
 
     if (opts.split) {
       const used = new Set();
@@ -734,7 +1056,7 @@
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.9</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.10</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -750,8 +1072,13 @@
         <select id="mufyx-shape">
           <option value="split">每段对话一个文件（打包成 ZIP）</option>
           <option value="one">全部合并成一份 Markdown</option>
+          <option value="epub">每个角色一本电子书（EPUB）</option>
         </select>
       </label>
+      <div id="mufyx-epubtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        直接出电子书，不用装 Python。导进微信读书 / 图书 / 静读天下就能当小说翻。<br>
+        书里一律是清理过的正文；要留原始数据请另导一次 ZIP。
+      </div>
       <label><input type="checkbox" id="mufyx-tidy" checked> 清理 think / 状态栏 HTML</label>
       <label><input type="checkbox" id="mufyx-json" checked> 附带 JSON 完整备份</label>
       <div class="row">
@@ -765,6 +1092,9 @@
     $('mufyx-close').onclick = () => { panel.remove(); panel = null; };
     $('mufyx-scope').onchange = (e) => {
       $('mufyx-idwrap').style.display = e.target.value === 'manual' ? 'block' : 'none';
+    };
+    $('mufyx-shape').onchange = (e) => {
+      $('mufyx-epubtip').style.display = e.target.value === 'epub' ? 'block' : 'none';
     };
     $('mufyx-go').onclick = () => run(panel);
   }
@@ -780,10 +1110,12 @@
       log.scrollTop = log.scrollHeight;
     };
 
+    const shape = $('mufyx-shape').value;
     const opts = {
       tidy: $('mufyx-tidy').checked,
       json: $('mufyx-json').checked,
-      split: $('mufyx-shape').value === 'split',
+      shape,
+      split: shape === 'split',
     };
     const scope = $('mufyx-scope').value;
 
@@ -822,7 +1154,8 @@
 
         ids = usable.filter((c) => c.characterId).map((c) => ({ id: c.characterId, live: c.lastSessionId }));
         if (!ids.length) throw new Error('没有可导出的角色。');
-        if (!confirm(`要导出 ${ids.length} 个角色，每个角色一个压缩包，会跑很久。继续吗？`)) {
+        const unit = shape === 'epub' ? '一本电子书' : shape === 'one' ? '一份 Markdown' : '一个压缩包';
+        if (!confirm(`要导出 ${ids.length} 个角色，每个角色${unit}，会跑很久。继续吗？`)) {
           throw new Error('已取消。');
         }
       }
@@ -854,6 +1187,9 @@
     open, collectCharacter, toMarkdown, toMarkdownOne, emit,
     getArchives, getDialogs, getCharacterList, hasChatted,
     ensureToken, refreshToken, api, makeZip,
+    // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
+    // 挂出来就能拿真实存档在浏览器/Node 里直接验，不用真的连账号。
+    buildEpub, drawCover, stripTags, dropMachinery, chapterTitleEpub, uuid5,
   };
   open();
 })();
