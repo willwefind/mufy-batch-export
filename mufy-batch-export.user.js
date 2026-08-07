@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.15.0
+// @version      1.16.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -256,6 +256,17 @@
   //   bytes = 已经是 Uint8Array 的二进制（封面 PNG 走这条）
   //   store = 强制不压缩。EPUB 的 mimetype 必须是第一个条目且不压缩，否则很多阅读器不认。
   async function makeZip(files, onProgress, mime) {
+    // 体量太大就先打个招呼。有用户在 Safari 上导一个 352 段存档的角色时遇到：
+    // 日志显示导出完毕，**页面却自己刷新了一下**，然后什么文件都没有。
+    // 那不是刷新，是标签页被系统回收后重载了——页面一没，blob 跟着没，
+    // 连「⬇ 手动保存」都救不回来。所以这话必须在开跑前说，事后说没用。
+    const bulk = files.reduce((n, f) => n + (f.text ? f.text.length : 0), 0);
+    if (bulk > 8e6) {
+      say(`  ⚠️ 这一包很大（约 ${(bulk / 1e6).toFixed(1)}M 字）。手机浏览器可能扛不住。`);
+      say('     症状是「显示导出完毕、页面自己刷新了一下、然后没有文件」＝标签页被系统回收了。');
+      say('     建议：改用电脑导；或者取消勾选「附带 JSON 完整备份」（那份通常占一半以上）再试。');
+    }
+
     const enc = new TextEncoder();
     const parts = [];
     const central = [];
@@ -265,6 +276,15 @@
       const f = files[i];
       const nameBytes = enc.encode(f.name);
       const raw = f.bytes ? f.bytes : enc.encode(f.text);
+      // 🔴 编码完立刻把源数据放掉。几百段对话的 Markdown 加上那份完整 JSON 会一直
+      //    压在堆里，和压缩产物同时存在 —— 峰值能把标签页顶崩。
+      //    有用户在 Safari 上导一个 352 段存档的角色时遇到过：日志显示导出完毕，
+      //    **页面却自己刷新了一下**，然后什么文件都没有。那不是刷新，
+      //    是系统把这个标签页杀掉后重载了；页面一重载，blob 跟着没，
+      //    连 v1.14 那个「手动保存」兜底都救不回来。
+      //    调用方在 makeZip 之后不再读 text/bytes（emit / emitMasks / emitCards 都是先建后打包）。
+      f.text = null;
+      f.bytes = null;
       const crc = crc32(raw);
       const { date, time } = dosDT(f.date);
 
@@ -1463,7 +1483,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.15</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.16</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
