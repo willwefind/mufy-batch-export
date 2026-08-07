@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.13.0
+// @version      1.14.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -146,15 +146,69 @@
     return `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}`;
   }
 
+  const mb = (n) => (n / 1048576).toFixed(2) + ' MB';
+
+  // 面板日志的出口。downloadBlob 在很深的地方被调用，拿不到 run() 里的 report，
+  // 所以留一个模块级的出口，run() 开跑时把它接上。
+  let logSink = null;
+  const say = (m) => { if (logSink) logSink(m); };
+
+  // ⚠️ 这里原来是「下载完 8 秒就 URL.revokeObjectURL()」。8 秒定得偏激进——
+  //    FileSaver.js 这类库普遍留 40 秒以上，理由是浏览器把 blob 写进磁盘要时间，
+  //    URL 提前注销有可能让还没写完的下载失败。
+  //    ⚠️ **这是隐患，不是已证实的病因**：有用户反馈「脚本说完成了、下载列表里却没有文件」，
+  //    这条是嫌疑之一（另两个嫌疑：浏览器的自动下载策略静默拦截、下载目录失效），
+  //    截至改动时还没拿到能定案的现场信息。别把它当成已经查实的根因去引用。
+  //
+  // 现在不再定时注销：生成过的文件留在面板上可以手动再存一次。
+  // 手动点是**用户手势**，浏览器基本不拦；自动触发的下载才会被
+  // 「是否允许下载多个文件」那条策略掐掉，而且掐得没有任何提示。
+  const RECENT_MAX = 8;
+  const RECENT_MAX_BYTES = 64 * 1024 * 1024; // 兜底也不能把她的内存吃光
+  const recentFiles = [];
+
+  function rememberFile(name, url, size) {
+    recentFiles.push({ name, url, size });
+    let total = recentFiles.reduce((n, f) => n + f.size, 0);
+    // 至少留一个，其余按「条数」和「总字节」两个上限一起淘汰
+    while (recentFiles.length > 1 && (recentFiles.length > RECENT_MAX || total > RECENT_MAX_BYTES)) {
+      const old = recentFiles.shift();
+      URL.revokeObjectURL(old.url);
+      total -= old.size;
+    }
+    renderRecent();
+  }
+
+  function renderRecent() {
+    const box = panel && panel.querySelector('#mufyx-recent');
+    if (!box) return;
+    box.textContent = '';
+    if (!recentFiles.length) return;
+    const tip = document.createElement('div');
+    tip.className = 'rt';
+    tip.textContent = `下载列表里没有？点下面这些手动保存（留最近 ${recentFiles.length} 个）：`;
+    box.appendChild(tip);
+    for (const f of [...recentFiles].reverse()) {
+      const a = document.createElement('a');
+      a.href = f.url;
+      a.download = f.name;
+      a.textContent = `⬇ ${f.name}　${mb(f.size)}`;
+      box.appendChild(a);
+    }
+  }
+
   function downloadBlob(filename, blob) {
     const url = URL.createObjectURL(blob);
+    // 先把文件名和大小记进日志再点 —— 以后有人反馈「说完成了却没文件」，
+    // 一看日志就知道是「压根没生成」还是「生成了但浏览器没收下」。
+    say(`  ⬇ ${filename}　${mb(blob.size)}`);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 8000);
+    rememberFile(filename, url, blob.size);
   }
 
   const download = (filename, text) =>
@@ -311,9 +365,15 @@
   async function getCharacter(characterId) {
     try {
       const d = await api('/api/characters/get?id=' + encodeURIComponent(characterId));
-      return { name: (d && d.name) || characterId.slice(0, 8), greeting: (d && d.greeting) || '' };
+      // lastSessionId 也一并带回来：「手动填角色 ID」和「当前角色」这两条路
+      // 拿不到角色列表，没有它就会漏掉「聊过但没存档」的那一段。
+      return {
+        name: (d && d.name) || characterId.slice(0, 8),
+        greeting: (d && d.greeting) || '',
+        lastSessionId: (d && d.lastSessionId) || '',
+      };
     } catch (e) {
-      return { name: characterId.slice(0, 8), greeting: '' };
+      return { name: characterId.slice(0, 8), greeting: '', lastSessionId: '' };
     }
   }
 
@@ -718,7 +778,12 @@
   //    实测在一个 200+ 角色的账号上，有 102 个角色属于这种情况，
 //    合计 1356 条消息（最多的一个 112 条）曾被整段漏掉。
   async function collectCharacter(characterId, opts, report, limit, liveSessionId) {
-    const { name, greeting } = await getCharacter(characterId);
+    const { name, greeting, lastSessionId } = await getCharacter(characterId);
+    // 🔴 列表那条路会把 lastSessionId 传进来；「手动填 ID」和「当前角色」不会。
+    //    不补上的话，一个只有「聊过没保存」内容的角色，用手动 ID 去导会导出 0 段——
+    //    而同一个角色走「全部聊过的角色」却是有内容的。README 又恰好教人
+    //    「失败了用手动填 ID 补一遍」，不补这里那句话就是错的。
+    if (!liveSessionId && lastSessionId) liveSessionId = lastSessionId;
     report(`【${name}】读取存档列表…`);
     const archives = await getArchives(characterId);
 
@@ -1278,7 +1343,6 @@ ${ncxpts.join('\n')}
       report(`【${pack.name}】打包 ${files.length} 个文件…`);
       const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
       downloadBlob(base + '.zip', zip);
-      report(`  ZIP 大小 ${(zip.size / 1048576).toFixed(2)} MB`);
     } else {
       download(base + '.md', toMarkdown(pack, opts));
       if (opts.json) download(base + '.json', JSON.stringify(pack, null, 2));
@@ -1305,6 +1369,11 @@ ${ncxpts.join('\n')}
     background:rgba(150,120,235,.28);color:#efeaff;border:1px solid rgba(190,170,255,.4)}
   #mufyx-panel button:hover{background:rgba(150,120,235,.45)}
   #mufyx-panel button:disabled{opacity:.45;cursor:default}
+  #mufyx-recent{margin-top:10px;display:flex;flex-direction:column;gap:3px}
+  #mufyx-recent .rt{font-size:11px;color:#9c93bd;margin-bottom:2px}
+  #mufyx-recent a{font-size:11.5px;color:#cbbcff;text-decoration:none;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #mufyx-recent a:hover{text-decoration:underline;color:#e6dcff}
   #mufyx-log{margin-top:12px;max-height:150px;overflow:auto;font-size:11.5px;line-height:1.5;
     color:#b8aed6;white-space:pre-wrap;border-top:1px solid rgba(190,170,255,.18);padding-top:8px}
   #mufyx-close{position:absolute;top:10px;right:12px;background:none;border:none;color:#9c93bd;cursor:pointer;
@@ -1375,7 +1444,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.13</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.14</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1417,9 +1486,11 @@ ${ncxpts.join('\n')}
       <div class="row">
         <button id="mufyx-go">开始导出</button>
       </div>
+      <div id="mufyx-recent"></div>
       <div id="mufyx-log">准备就绪。</div>
     `;
     document.body.appendChild(panel);
+    renderRecent(); // 面板关掉再打开，之前生成的文件还留着，能继续手动保存
 
     const $ = (id) => panel.querySelector('#' + id);
     $('mufyx-close').onclick = () => { panel.remove(); panel = null; };
@@ -1469,6 +1540,7 @@ ${ncxpts.join('\n')}
       log.textContent = lines.slice(-40).join('\n');
       log.scrollTop = log.scrollHeight;
     };
+    logSink = report; // downloadBlob 埋得深，靠这个把「⬇ 文件名 大小」写进同一份日志
 
     const shape = $('mufyx-shape').value;
     const opts = {
@@ -1602,6 +1674,7 @@ ${ncxpts.join('\n')}
     getMasks, maskToMarkdown, emitMasks, maskTitle,
     getMyCards, cardToMarkdown, emitCards, cardRoles, cardAdversity, fetchCardImages,
     ensureToken, refreshToken, api, makeZip,
+    downloadBlob, renderRecent, recentFiles, setLogSink: (f) => { logSink = f; },
     // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
     // 挂出来就能拿真实存档在浏览器/Node 里直接验，不用真的连账号。
     buildEpub, drawCover, stripTags, dropMachinery, chapterTitleEpub, uuid5,
