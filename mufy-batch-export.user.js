@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.8.0
+// @version      1.9.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：合并成一份 Markdown，或每段对话一个文件打包成 ZIP
 // @author       Ciel
 // @license      MIT
@@ -322,7 +322,12 @@
   async function getDialogs(sessionId, characterId) {
     const out = [];
     let page = 1, expected = null, stopped = '';
-    const size = 100;
+    // 实测接口不限于 100 条一页（试到 2000 都接受），而且 100/200/500 三种页大小
+    // 翻完得到的是同样的唯一 ID 集合、0 重复 0 漏掉 —— 偏移量是准的。
+    // 调大到 500：一万轮对话（约两万条）从 200 次请求降到 40 次，
+    // 暴露在网络抖动下的机会少 5 倍。就算服务端偷偷截短也不怕：
+    // 下面的循环是「没收够 total 就继续翻」，不依赖服务端一定给满。
+    const size = 500;
     for (;;) {
       let d;
       try {
@@ -641,6 +646,8 @@
 
   // ---------- 界面 ----------
   const css = `
+  /* ⚠️ 别钉在 bottom:16px —— 手机版 mufy 的底部导航就在那儿，会把「首页」键盖住。
+     窄屏一律抬到导航条上方；另外按钮自带一个 ✕，随时能收起来。 */
   #mufyx-btn{position:fixed;left:16px;bottom:16px;z-index:2147483646;padding:8px 14px;border-radius:999px;
     background:rgba(30,26,45,.92);color:#e9e4f5;border:1px solid rgba(190,170,255,.35);font:13px/1.4 system-ui,sans-serif;
     cursor:pointer;backdrop-filter:blur(8px);box-shadow:0 4px 18px rgba(0,0,0,.4)}
@@ -661,6 +668,16 @@
     color:#b8aed6;white-space:pre-wrap;border-top:1px solid rgba(190,170,255,.18);padding-top:8px}
   #mufyx-close{position:absolute;top:10px;right:12px;background:none;border:none;color:#9c93bd;cursor:pointer;
     font-size:15px;padding:0;width:auto;flex:none}
+  /* 按钮右上角的收起小叉 */
+  #mufyx-hide{position:fixed;z-index:2147483647;width:20px;height:20px;line-height:18px;text-align:center;
+    border-radius:50%;background:rgba(20,17,30,.96);color:#c9c2e0;border:1px solid rgba(190,170,255,.45);
+    font-size:12px;cursor:pointer;padding:0}
+  #mufyx-hide:hover{color:#fff;border-color:rgba(190,170,255,.9)}
+  /* 手机 / 窄屏：抬到底部导航上方，别压住 mufy 自己的按键 */
+  @media (max-width: 820px){
+    #mufyx-btn{bottom:84px;left:12px;padding:7px 12px;font-size:12px}
+    #mufyx-panel{left:8px;right:8px;width:auto;bottom:128px;max-height:70vh;overflow-y:auto}
+  }
   `;
 
   const style = document.createElement('style');
@@ -672,6 +689,43 @@
   btn.textContent = '⬇ 批量导出';
   document.body.appendChild(btn);
 
+  // 收起按钮的 ✕。有人反馈这个悬浮框挡住了 mufy 手机版的首页键，
+  // 而当时根本没给关的办法 —— 这是必须有的东西，不是锦上添花。
+  const hideBtn = document.createElement('button');
+  hideBtn.id = 'mufyx-hide';
+  hideBtn.textContent = '✕';
+  hideBtn.title = '收起这个按钮（刷新页面就回来；想彻底关掉请在 Tampermonkey 里停用本脚本）';
+  document.body.appendChild(hideBtn);
+
+  function placeHide() {
+    const r = btn.getBoundingClientRect();
+    hideBtn.style.left = (r.right - 8) + 'px';
+    hideBtn.style.top = (r.top - 8) + 'px';
+  }
+  function setHidden(on) {
+    btn.style.display = on ? 'none' : '';
+    hideBtn.style.display = on ? 'none' : '';
+    if (on && panel) { panel.remove(); panel = null; }
+    if (!on) placeHide();
+  }
+  // 只收起当前这次浏览，刷新即恢复。
+  // 故意不做「永久隐藏」：那样的人会以为脚本坏了，却找不回来。
+  // 真想永久关掉，正解是在 Tampermonkey 里停用本脚本 —— 提示语里写明了。
+  hideBtn.onclick = (e) => {
+    e.stopPropagation();
+    setHidden(true);
+    const tip = document.createElement('div');
+    tip.textContent = '已收起。刷新页面会回来；想永久关掉请在 Tampermonkey 里停用本脚本。';
+    tip.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;'
+      + 'background:rgba(20,17,30,.96);color:#e9e4f5;border:1px solid rgba(190,170,255,.4);border-radius:12px;'
+      + 'padding:10px 16px;font:13px/1.5 system-ui,sans-serif;max-width:86vw;text-align:center';
+    document.body.appendChild(tip);
+    setTimeout(() => tip.remove(), 5200);
+  };
+  addEventListener('resize', placeHide);
+  addEventListener('scroll', placeHide, true);
+  setTimeout(placeHide, 0);
+
   let panel = null;
 
   function open() {
@@ -680,7 +734,7 @@
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.8</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.9</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
