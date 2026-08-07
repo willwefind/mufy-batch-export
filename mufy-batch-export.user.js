@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.10.0
-// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书
+// @version      1.11.0
+// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库导出来
 // @author       Ciel
 // @license      MIT
 // @homepageURL  https://github.com/willwefind/mufy-batch-export
@@ -74,17 +74,21 @@
   }
 
   // 401 → 换 token 重来；5xx / 429 / 断网 → 退避重试（真遇到过 503）
-  async function api(path) {
+  // 传了 body 就走 POST（面具接口只认 POST，聊天那几个接口都是 GET）
+  async function api(path, body) {
     const MAX = 4;
     let last = '';
     for (let i = 0; i < MAX; i++) {
       const t = await ensureToken();
       let res;
       try {
-        res = await fetch(ORIGIN + path, {
-          headers: { Authorization: 'Bearer ' + t },
-          credentials: 'include',
-        });
+        const init = { headers: { Authorization: 'Bearer ' + t }, credentials: 'include' };
+        if (body !== undefined) {
+          init.method = 'POST';
+          init.headers['Content-Type'] = 'application/json';
+          init.body = JSON.stringify(body);
+        }
+        res = await fetch(ORIGIN + path, init);
       } catch (e) {
         last = '网络错误 ' + e.message;
         await sleep(900 * (i + 1));
@@ -391,6 +395,117 @@
   // 判据：没有 lastSessionId（这类的 lastInteracted 是 0001-01-01 的零值）
   function hasChatted(c) {
     return !!c.lastSessionId;
+  }
+
+  // ---------- 人设面具 ----------
+  // 面具和聊天记录是两套东西：它不挂在任何角色底下，是账号级的一份清单，
+  // 所以走自己的接口、自己的导出路径，和上面那套角色/存档/对话完全不相干。
+  //
+  // ⚠️ /api/masks/query 是 POST，而且字段名是 page（不是聊天那边的 pageNum）；
+  //    pageSize 上限 100（填 300 直接 400）。这三点都是实测出来的，别照抄聊天接口的写法。
+  const MASK_FIELDS = [
+    ['remark', '备注'],
+    ['maskName', '名称'],
+    ['gender', '性别'],
+    ['description', '我的描述'],
+    ['favorite', '我的喜好'],
+    ['command', '指令'],
+  ];
+
+  async function getMasks(report) {
+    const out = [];
+    let page = 1;
+    for (;;) {
+      const d = await api('/api/masks/query', { page, pageSize: 100 });
+      const rows = (d && d.data) || [];
+      out.push(...rows);
+      if (report && d && d.total) report(`  已读 ${out.length}/${d.total}`);
+      if (!rows.length || d.hasNext === false) break;
+      page += 1;
+      if (page > 60) break; // 兜底，别让分页出岔子时空转
+      await sleep(120);
+    }
+    return out;
+  }
+
+  // 面具标题：备注是列表里显示的那一行，最认得出来；备注为空才退到名称
+  function maskTitle(m) {
+    return String(m.remark || m.maskName || ('面具 ' + m.maskId)).trim() || ('面具 ' + m.maskId);
+  }
+
+  // level=1：一个面具一份文件；level=2：合并成一份时整体降一级。
+  // ⚠️ 降级只能在这儿按结构做，绝不能事后拿正则去改整篇 —— 面具正文里本来就可能有
+  //    以 "## " 开头的行（描述那栏经常是一整篇 markdown），正则会连正文一起改掉。
+  //    实测一个 252 个面具的库里有 57 个正文自带标题行 —— 不是理论风险。
+  function maskToMarkdown(m, exportedAt, level) {
+    const h1 = '#'.repeat(level || 1);
+    const h2 = '#'.repeat((level || 1) + 1);
+    const head =
+      `${h1} ${maskTitle(m)}\n\n` +
+      `- 面具 ID：${m.maskId}\n` +
+      (m.createdAt ? `- 创建时间：${new Date(m.createdAt).toLocaleString('zh-CN')}\n` : '') +
+      `- 导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n\n---\n`;
+    // 六个字段一律留着，哪怕是空的 —— 空着也是事实，删掉了以后就看不出原来有没有
+    const body = MASK_FIELDS
+      .map(([k, label]) => {
+        const v = String(m[k] == null ? '' : m[k]).trim();
+        return `\n${h2} ${label}\n\n${v || '（空）'}\n`;
+      })
+      .join('');
+    return head + body;
+  }
+
+  async function emitMasks(masks, opts, ts, report) {
+    const exportedAt = new Date().toISOString();
+    const base = `mufy_人设面具_${masks.length}个_${ts}`;
+
+    if (!opts.split) {
+      const text =
+        `# 人设面具 · 共 ${masks.length} 个\n\n` +
+        `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n\n` +
+        masks.map((m) => '\n---\n\n' + maskToMarkdown(m, exportedAt, 2)).join('');
+      download(base + '.md', text);
+      if (opts.json) download(base + '.json', JSON.stringify({ exportedAt, count: masks.length, masks }, null, 2));
+      report(`✅ 已合并导出 ${masks.length} 个面具`);
+      return;
+    }
+
+    const used = new Set();
+    const files = masks.map((m, i) => {
+      const idx = String(i + 1).padStart(3, '0');
+      let nm = `${idx}_${safeName(cut(maskTitle(m), 40))}.md`;
+      while (used.has(nm)) nm = nm.replace(/\.md$/, '_.md');
+      used.add(nm);
+      return { name: nm, text: maskToMarkdown(m, exportedAt), date: new Date(m.createdAt || exportedAt) };
+    });
+
+    // 目录要用上面刚定好的文件名，所以必须在 unshift 之前算完
+    const toc =
+      `# 人设面具 · 共 ${masks.length} 个\n\n` +
+      `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}\n\n` +
+      `顺序与 mufy 面具库里的一致。\n\n` +
+      masks
+        .map((m, i) => {
+          const nm = String(m.maskName || '').trim();
+          const g = String(m.gender || '').trim();
+          return `${i + 1}. [${files[i].name}](${linkTarget(files[i].name)})　${nm}${g ? ' · ' + g : ''}`;
+        })
+        .join('\n') + '\n';
+
+    files.unshift({ name: '00_目录.md', text: toc, date: new Date(exportedAt) });
+
+    if (opts.json) {
+      files.push({
+        name: '_原始数据.json',
+        text: JSON.stringify({ exportedAt, count: masks.length, masks }, null, 2),
+        date: new Date(exportedAt),
+      });
+    }
+
+    report(`打包 ${files.length} 个文件…`);
+    const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+    downloadBlob(base + '.zip', zip);
+    report(`✅ ${masks.length} 个面具已打包，ZIP 大小 ${(zip.size / 1048576).toFixed(2)} MB`);
   }
 
   // ---------- 组装一个角色的导出内容 ----------
@@ -1056,15 +1171,20 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.10</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.11</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
           <option value="chatted">全部聊过的角色（慢）</option>
           <option value="followed">全部已关注角色（慢，含没聊过的）</option>
           <option value="manual">手动填角色 ID</option>
+          <option value="masks">人设面具（全部，不是聊天记录）</option>
         </select>
       </label>
+      <div id="mufyx-masktip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        导的是「人设面具」库，和聊天记录无关。<br>
+        每个面具一份，按 备注／名称／性别／我的描述／我的喜好／指令 分好节。
+      </div>
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
@@ -1075,6 +1195,9 @@ ${ncxpts.join('\n')}
           <option value="epub">每个角色一本电子书（EPUB）</option>
         </select>
       </label>
+      <div id="mufyx-tidytip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        面具是纯文本设定，「清理 think」对它没有作用。
+      </div>
       <div id="mufyx-epubtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
         直接出电子书，不用装 Python。导进微信读书 / 图书 / 静读天下就能当小说翻。<br>
         书里一律是清理过的正文；要留原始数据请另导一次 ZIP。
@@ -1090,12 +1213,29 @@ ${ncxpts.join('\n')}
 
     const $ = (id) => panel.querySelector('#' + id);
     $('mufyx-close').onclick = () => { panel.remove(); panel = null; };
-    $('mufyx-scope').onchange = (e) => {
-      $('mufyx-idwrap').style.display = e.target.value === 'manual' ? 'block' : 'none';
+    // 面具那条路和聊天记录不共用参数：EPUB 无从谈起（没有对话可成章），
+    // 「清理 think」也无从谈起（面具本来就是纯文本设定）。
+    // 这两项不静默忽略，而是当场改掉界面说明白 —— 静默忽略等于骗人。
+    const syncUI = () => {
+      const isMask = $('mufyx-scope').value === 'masks';
+      const shapeSel = $('mufyx-shape');
+      const epubOpt = shapeSel.querySelector('option[value=epub]');
+
+      $('mufyx-idwrap').style.display = $('mufyx-scope').value === 'manual' ? 'block' : 'none';
+      $('mufyx-masktip').style.display = isMask ? 'block' : 'none';
+      $('mufyx-tidytip').style.display = isMask ? 'block' : 'none';
+
+      epubOpt.disabled = isMask;
+      epubOpt.textContent = isMask ? '每个角色一本电子书（EPUB · 面具不适用）' : '每个角色一本电子书（EPUB）';
+      if (isMask && shapeSel.value === 'epub') shapeSel.value = 'split';
+
+      shapeSel.querySelector('option[value=split]').textContent =
+        isMask ? '每个面具一个文件（打包成 ZIP）' : '每段对话一个文件（打包成 ZIP）';
+
+      $('mufyx-epubtip').style.display = shapeSel.value === 'epub' ? 'block' : 'none';
     };
-    $('mufyx-shape').onchange = (e) => {
-      $('mufyx-epubtip').style.display = e.target.value === 'epub' ? 'block' : 'none';
-    };
+    $('mufyx-scope').onchange = syncUI;
+    $('mufyx-shape').onchange = syncUI;
     $('mufyx-go').onclick = () => run(panel);
   }
 
@@ -1126,6 +1266,17 @@ ${ncxpts.join('\n')}
       report('确认登录态…');
       await ensureToken();
       report('登录态 OK');
+
+      // 面具是账号级的一份清单，不挂角色，走自己的路，走完就结束
+      if (scope === 'masks') {
+        report('读取人设面具库…');
+        const masks = await getMasks(report);
+        if (!masks.length) throw new Error('面具库是空的（或者接口没返回内容）。');
+        report(`共 ${masks.length} 个面具。`);
+        await emitMasks(masks, opts, stamp(), report);
+        report('全部完成。文件在浏览器的下载目录里。');
+        return;
+      }
 
       let ids = []; // [{ id, live }]
       if (scope === 'current') {
@@ -1186,6 +1337,7 @@ ${ncxpts.join('\n')}
   window.__mufyExporter = {
     open, collectCharacter, toMarkdown, toMarkdownOne, emit,
     getArchives, getDialogs, getCharacterList, hasChatted,
+    getMasks, maskToMarkdown, emitMasks, maskTitle,
     ensureToken, refreshToken, api, makeZip,
     // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
     // 挂出来就能拿真实存档在浏览器/Node 里直接验，不用真的连账号。
