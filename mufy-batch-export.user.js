@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.7.0
+// @version      1.8.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：合并成一份 Markdown，或每段对话一个文件打包成 ZIP
 // @author       Ciel
 // @license      MIT
@@ -315,25 +315,43 @@
   }
 
   // 拉一个 session 的全部消息（自动翻页）
+  // 🔴 这里以前是「任一页失败就整个抛出」，调用方接住之后会退回用存档里那一问一答——
+  //    于是一段 600 条的长对话，翻到第 5 页时网络抖一下，导出来就只剩 2 条，
+  //    而且只在角落留一个 ⚠️。长对话才需要翻页，所以这个坑专挑长记录下手。
+  //    现在：抓到多少留多少，并且明确记下「接口说有多少 / 实际拿到多少」。
   async function getDialogs(sessionId, characterId) {
     const out = [];
-    let page = 1;
+    let page = 1, expected = null, stopped = '';
     const size = 100;
     for (;;) {
-      const d = await api(
-        `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}&characterId=${encodeURIComponent(characterId)}` +
-          `&pageNum=${page}&pageSize=${size}`
-      );
+      let d;
+      try {
+        d = await api(
+          `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}&characterId=${encodeURIComponent(characterId)}` +
+            `&pageNum=${page}&pageSize=${size}`
+        );
+      } catch (e) {
+        stopped = `第 ${page} 页取失败：${e.message}`;
+        break;                       // ← 别抛，保住已经抓到的
+      }
       const rows = (d && d.data) || [];
       out.push(...rows);
-      const total = d && typeof d.total === 'number' ? d.total : out.length;
-      if (!rows.length || out.length >= total || d.hasNext === false) break;
+      if (expected === null && d && typeof d.total === 'number') expected = d.total;
+      if (!rows.length || (expected !== null && out.length >= expected) || (d && d.hasNext === false)) break;
       page += 1;
-      if (page > 200) break; // 保险丝
+      if (page > 500) { stopped = '页数超过上限 500'; break; }
       await sleep(120);
     }
     out.sort((a, b) => new Date(a.createdTime || 0) - new Date(b.createdTime || 0));
-    return out;
+
+    // 拿到的比接口说的少 —— 这就是「被吞了」，必须说出来，不能静默
+    const short = expected !== null && out.length < expected;
+    return {
+      dialogs: out,
+      expected,
+      incomplete: !!(stopped || short),
+      reason: stopped || (short ? `接口说共 ${expected} 条，只取到 ${out.length} 条` : ''),
+    };
   }
 
   // 角色列表。followedOnly=true → 你关注的（含从没聊过的）；
@@ -404,16 +422,16 @@
     for (const item of list) {
       i += 1;
       report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…`);
-      let dialogs = [];
-      let err = null;
-      try {
-        dialogs = await getDialogs(item.sessionId, characterId);
-      } catch (e) {
-        err = e.message;
-        report('  ⚠️ ' + e.message);
+      const r = await getDialogs(item.sessionId, characterId);
+      let dialogs = r.dialogs;
+      let err = r.incomplete ? r.reason : null;
+      if (r.incomplete) {
+        opts.incompleteCount = (opts.incompleteCount || 0) + 1;
+        report(`  ⚠️ 不完整：${r.reason}`);
       }
 
-      // session 已被清空 / 取不到时，退回用存档里存的那一问一答
+      // 只有一条都没抓到才退回存档里那一问一答。
+      // 千万别在「抓到一部分」时也退回去 —— 那等于把几百条换成 2 条。
       if (!dialogs.length && item.archives.length) {
         const a = item.archives[0];
         dialogs = [
@@ -431,6 +449,8 @@
           createdAt: a.createdAt,
         })),
         error: err,
+        incomplete: !!r.incomplete,
+        expectedCount: r.expected,
         messageCount: dialogs.length,
         dialogs,
       });
@@ -518,7 +538,14 @@
     L.push(`- session \`${s.sessionId}\``);
     if (s.archives.length) L.push(`- 存档时间：${new Date(s.archives[0].createdAt).toLocaleString('zh-CN')}`);
     else L.push('- ⚠️ 这段没有存档，是从「最后一次聊天」里直接捞出来的');
-    if (s.error) L.push(`- ⚠️ ${s.error}`);
+    if (s.incomplete) {
+      L.push('');
+      L.push(`> 🔴 **这一段没导完整。** ${s.error || ''}`);
+      L.push('> 多半是抓取途中网络出了问题。重跑一次这个角色通常就好了。');
+      L.push('');
+    } else if (s.error) {
+      L.push(`- ⚠️ ${s.error}`);
+    }
     if (opts.tidy) L.push('- 已清理 `<think>` 与状态栏 HTML');
     L.push('', '---', '');
     L.push(...renderMessages(pack, s, opts));
@@ -653,7 +680,7 @@
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.7</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.8</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -754,6 +781,11 @@
         const msgs = pack.sessions.reduce((n, s) => n + s.messageCount, 0);
         report(`✅ 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
         await sleep(400);
+      }
+      // 不完整必须在结尾再喊一次 —— 中间那行 ⚠️ 早被后面几百行冲走了
+      if (opts.incompleteCount) {
+        report(`🔴 有 ${opts.incompleteCount} 段没导完整（见各自文件开头的红字）。`);
+        report('   多半是网络抖动。把对应角色单独重导一次通常就好了。');
       }
       report('全部完成。文件在浏览器的下载目录里。');
     } catch (e) {
