@@ -590,6 +590,24 @@ function save() {
   bootFromCache();     // 有缓存就直接开，不用选文件
 })();
 
+/* 手机上选不了文件夹（webkitdirectory 是桌面特性），布局也是按桌面排的。
+   与其让人对着一个坏掉的界面猜，不如直接说清楚，并指向 EPUB。 */
+(function mobileNotice() {
+  const narrow = Math.min(screen.width, screen.height) < 700 ||
+                 /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  if (!narrow) return;
+  const e = $('empty');
+  if (!e) return;
+  e.innerHTML = `<div style="max-width:26em">
+    <b>这个阅读器是给电脑用的</b><br><br>
+    手机浏览器不支持「选择文件夹」，界面也是按大屏排的，在这里用不了。<br><br>
+    <span style="opacity:.75">想在手机上读，请用 <b>EPUB</b>：
+    用仓库里的 <code>make-epub.py</code> 把导出的 zip 转成电子书，
+    每个角色一本、每段对话一章，导进微信读书 / Apple Books 就能翻，
+    目录、书签、进度都是原生的。</span>
+  </div>`;
+})();
+
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === 'ArrowRight' && !$('next').disabled) openCap(S.cap + 1);
