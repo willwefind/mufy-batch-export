@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.16.0
+// @version      1.17.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -211,8 +211,18 @@
     rememberFile(filename, url, blob.size);
   }
 
+  // 安卓（和 Windows 上一些老编辑器）看 .md 时会**自己猜编码**，猜成 GBK 中文就全是乱码。
+  // 猜得准不准跟文件内容有关，所以会出现「同一批导出，有的正常有的乱码」。
+  // 加个 UTF-8 BOM 就是明着告诉它别猜。
+  // ⚠️ **只给 .md 加**：JSON 带 BOM 会让 `JSON.parse` / Python 的 `json.loads` 直接报错
+  //    （`make-epub.py` 和网页阅读器读的就是 `_原始数据.json`），EPUB 里的 XHTML 也不要。
+  const BOM = '\uFEFF'; // 写成转义：源码里别放不可见字符，会被编辑器/脚本悄悄吃掉 // 写成转义，别在源码里放不可见字符——会被编辑器/脚本悄悄吃掉
+  const wantsBom = (name) => /\.md$/i.test(name || '');
+  const withBom = (name, text) =>
+    wantsBom(name) && !String(text).startsWith(BOM) ? BOM + text : text;
+
   const download = (filename, text) =>
-    downloadBlob(filename, new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    downloadBlob(filename, new Blob([withBom(filename, text)], { type: 'text/plain;charset=utf-8' }));
 
   // ---------- ZIP（不依赖任何外部库） ----------
   // 压缩用浏览器原生 CompressionStream('deflate-raw')；没有就退回不压缩存储。
@@ -275,7 +285,8 @@
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       const nameBytes = enc.encode(f.name);
-      const raw = f.bytes ? f.bytes : enc.encode(f.text);
+      // withBom 只对 .md 生效；.json 和 EPUB 内部的 xhtml/opf/ncx 一律不加
+      const raw = f.bytes ? f.bytes : enc.encode(withBom(f.name, f.text));
       // 🔴 编码完立刻把源数据放掉。几百段对话的 Markdown 加上那份完整 JSON 会一直
       //    压在堆里，和压缩产物同时存在 —— 峰值能把标签页顶崩。
       //    有用户在 Safari 上导一个 352 段存档的角色时遇到过：日志显示导出完毕，
@@ -1483,7 +1494,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.16</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.17</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
