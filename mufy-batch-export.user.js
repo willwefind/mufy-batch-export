@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.27.0
+// @version      1.28.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -518,8 +518,9 @@
       reason: stopped
         || (short
           ? `接口说共 ${expected} 条，只取到 ${out.length} 条（换小页重试过，还是这么多）` +
-            `——也可能那边本来就只剩这些：mufy 迁移过服务器并公告说会丢一部分记录，` +
-            `而它返回的总数似乎没跟着更新。想确认就在 mufy 里把这段往上翻到底数一数。`
+            `——已有两位用户各自查实过，是 mufy 那边真的丢了：它迁移过服务器并公告说` +
+            `会丢一部分记录，而返回的总数还是丢失之前的数字。也就是说少掉的那些在 mufy 上` +
+            `也已经翻不出来了，不是这个脚本没抓到。想自己确认就在 mufy 里把这段往上翻到底数一数。`
           : ''),
     };
   }
@@ -888,6 +889,36 @@
     if (missing) report(`🔴 有 ${missing} 张图片没抓下来（卡片开头有记）。`);
   }
 
+  // 一段对话的内容指纹。用来认出「同一份聊天记录被导了两遍」：
+  // 在 mufy 里把某个存档**载入**之后，它同时又成了这个角色的「最后一次聊天」，
+  // 于是存档那条路和 lastSessionId 那条路各给一个 sessionId，内容却一模一样
+  // （用户报的症状：两段的条数和文件大小分毫不差）。
+  // 🔴 不要为了比对去拼一个完整的大字符串 —— 一段一万轮的对话就是几 MB，
+  //    几十段一起拼必然把内存顶爆（这脚本已经为 OOM 改过两版了）。
+  //    这里逐字滚哈希，不留中间串；条数 + 总字数 + 两个独立哈希一起当键，
+  //    要撞上得四项同时撞，实际就是同一份内容。
+  function sessionFingerprint(s) {
+    let h1 = 0x811c9dc5, h2 = 0x1505, n = 0;
+    for (const m of s.dialogs || []) {
+      const t = (m.role || '') + '\u0000' + contentToText(m.content);
+      n += t.length;
+      for (let i = 0; i < t.length; i++) {
+        const c = t.charCodeAt(i);
+        h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+        h2 = (Math.imul(h2, 33) + c) >>> 0;
+      }
+    }
+    return `${(s.dialogs || []).length}:${n}:${h1.toString(36)}:${h2.toString(36)}`;
+  }
+
+  // 同一份内容的两段里留哪一段：有存档的优先（标题能用存档备注，时间也是真的），
+  // 都有或都没有就留先遇到的那个。
+  function betterOfDup(a, b) {
+    const ar = (a.archives || []).length ? 1 : 0;
+    const br = (b.archives || []).length ? 1 : 0;
+    return br > ar ? b : a;
+  }
+
   // ---------- 组装一个角色的导出内容 ----------
   // liveSessionId = 角色列表里的 lastSessionId，也就是这个角色"活着的"那段对话。
   // ⚠️ 只走存档列表会漏掉它：你聊过但从没按"保存"的对话，存档接口根本不列。
@@ -967,17 +998,34 @@
 
       // 只有一条都没抓到才退回存档里那一问一答。
       // 千万别在「抓到一部分」时也退回去 —— 那等于把几百条换成 2 条。
+      //
+      // 🔴 这条退路以前是**完全沉默**的：接口对某个 session 一条对话都不给，
+      //    我们就默默写下存档里那一问一答，出来是个 1KB 的文件、里面只有几句话，
+      //    而用户以为那就是当年聊的全部（真收到过截图：同一个角色，别的段 2.8MB，
+      //    这两段 1KB）。很久以前的存档特别容易这样。
+      //    ——「部分成功必须能被看见」，所以现在标出来，并且给出救法：
+      //    用户实测在 mufy 里把这个存档「载入」成当前对话后重新导，就能拿到全文。
+      let fromArchiveOnly = false;
       if (!dialogs.length && item.archives.length) {
         const a = item.archives[0];
         dialogs = [
           { role: 'user', content: a.user_content, createdTime: a.createdAt, __fromArchive: true },
           { role: 'assistant', content: a.assistant_content, createdTime: a.createdAt, __fromArchive: true },
         ];
+        fromArchiveOnly = true;
+        opts.stubCount = (opts.stubCount || 0) + 1;
+        (opts.stubList = opts.stubList || []).push({
+          name,
+          when: String(item.archives[0].createdAt || '').slice(0, 10),
+          remark: item.archives.map((x) => x.remark).filter(Boolean).join(' / '),
+        });
+        report(`  🔴 只拿到存档摘要（接口一条对话都没给），这段要去 mufy 里「载入」后重导`);
       }
 
       sessions.push({
         sessionId: item.sessionId,
         isCurrent: !!item.current,
+        fromArchiveOnly,
         archives: item.archives.map((a) => ({
           archiveId: a.archiveId,
           remark: a.remark || '',
@@ -993,7 +1041,49 @@
     }
 
     // 一条消息都没有的段（比如从没说过话的角色）不值得单独出一个文件
-    const kept = sessions.filter((s) => s.messageCount > 0);
+    let kept = sessions.filter((s) => s.messageCount > 0);
+
+    // 内容完全相同的两段只留一份（见 sessionFingerprint 上面那段说明）。
+    // ⚠️ 只在「一字不差」时才合并 —— 载入存档之后又接着聊过的，条数就不一样了，
+    //    那是两段真不同的记录，绝不能碰。
+    // ⚠️ 分批导时，两段可能落在不同批里，所以指纹表挂在 opts 上跨批复用；
+    //    角色一换就清空（同一个角色的几批是连着跑的）。跨批撞上的那段只能在
+    //    日志和结尾清单里说，因为先出的那一批文件已经打包发出去了。
+    if (opts._fpChar !== characterId) { opts._fpChar = characterId; opts._fpSeen = new Map(); }
+    if (kept.length) {
+      const groups = new Map();
+      for (const s of kept) {
+        const fp = sessionFingerprint(s);
+        s.__fp = fp;
+        if (!groups.has(fp)) groups.set(fp, []);
+        groups.get(fp).push(s);
+      }
+      const survivors = [];
+      for (const [fp, group] of groups) {
+        const prev = opts._fpSeen.get(fp);
+        const keep = group.reduce(betterOfDup);
+        const dropped = group.filter((s) => s !== keep);
+        if (prev) {
+          // 前面的批次已经导过同样的内容了，这一整组都不用再出文件
+          for (const s of group) {
+            (opts.dupList = opts.dupList || []).push({ name, kept: prev.title, dropped: sessionTitle(s) });
+          }
+          report(`  🔁 有 ${group.length} 段和前面某一批里的「${prev.title}」内容完全相同，不再重复出文件`);
+          continue;
+        }
+        for (const s of dropped) {
+          keep.mergedFrom = keep.mergedFrom || [];
+          keep.mergedFrom.push({ sessionId: s.sessionId, title: sessionTitle(s), isCurrent: !!s.isCurrent });
+          (opts.dupList = opts.dupList || []).push({ name, kept: sessionTitle(keep), dropped: sessionTitle(s) });
+        }
+        if (dropped.length) {
+          report(`  🔁 「${sessionTitle(keep)}」和另 ${dropped.length} 段内容完全相同，已合并成一份`);
+        }
+        opts._fpSeen.set(fp, { title: sessionTitle(keep) });
+        survivors.push(keep);
+      }
+      kept = survivors;
+    }
 
     // 新的排前面
     kept.sort((a, b) => sessionTime(b) - sessionTime(a));
@@ -1077,10 +1167,30 @@
     L.push(`- session \`${s.sessionId}\``);
     if (s.archives.length) L.push(`- 存档时间：${new Date(s.archives[0].createdAt).toLocaleString('zh-CN')}`);
     else L.push('- ⚠️ 这段没有存档，是从「最后一次聊天」里直接捞出来的');
+    if (s.mergedFrom && s.mergedFrom.length) {
+      L.push(`- 🔁 另有 ${s.mergedFrom.length} 段内容与这一份**一字不差**，已合并（不再单独出文件）：` +
+             s.mergedFrom.map((d) => `「${d.title}」\`${d.sessionId}\``).join('、'));
+      L.push('  多半是你在 mufy 里**载入过这个存档**，于是它同时又成了「最后一次聊天」，');
+      L.push('  一份记录就走了两条路。合并只去掉重复的那份，内容一个字没少。');
+    }
+    if (s.fromArchiveOnly) {
+      L.push('');
+      L.push('> 🔴 **这一段只有存档摘要，不是完整对话。**');
+      L.push('> 接口对这个 session 一条对话都没返回，下面这一问一答是从存档记录本身抄下来的——');
+      L.push('> 存档只存这一对，所以这个文件才只有 1KB 上下。很久以前的存档特别容易这样。');
+      L.push('>');
+      L.push('> **有办法救**：去 mufy 里把这个存档**载入**（让它变成你当前正在聊的那段），');
+      L.push('> 然后重新导出这个角色。载入之后接口就给得出全文了——这是用户实测有效的做法。');
+      L.push('');
+    }
     if (s.incomplete) {
       L.push('');
       L.push(`> 🔴 **这一段没导完整。** ${s.error || ''}`);
-      L.push('> 多半是抓取途中网络出了问题。重跑一次这个角色通常就好了。');
+      // 「取失败」才是网络问题；「接口说共 N 条只取到 M 条」已经查实是 mufy 那边丢了，
+      // 对这种情况说「重跑一次通常就好」是空头支票，重跑多少次都是这么多。
+      if (/取失败|页数超过/.test(s.error || '')) {
+        L.push('> 多半是抓取途中网络出了问题。重跑一次这个角色通常就好了。');
+      }
       L.push('');
     } else if (s.error) {
       L.push(`- ⚠️ ${s.error}`);
@@ -1111,6 +1221,16 @@
       L.push(`## ${String(idx + 1).padStart(2, '0')}. ${sessionTitle(s)}`);
       L.push('');
       L.push(`> session \`${s.sessionId}\`　消息 ${s.messageCount} 条${s.error ? '　⚠️ ' + s.error : ''}`);
+      if (s.mergedFrom && s.mergedFrom.length) {
+        L.push('>');
+        L.push(`> 🔁 另有 ${s.mergedFrom.length} 段与这一份一字不差，已合并（你在 mufy 里载入过这个存档，` +
+               '它同时又是「最后一次聊天」）。');
+      }
+      if (s.fromArchiveOnly) {
+        L.push('>');
+        L.push('> 🔴 **这一段只有存档摘要，不是完整对话**：接口一条对话都没返回，下面这一问一答是从' +
+               '存档记录本身抄的。救法——去 mufy 里把这个存档**载入**成当前对话，再重新导出这个角色。');
+      }
       L.push('');
       L.push(...renderMessages(pack, s, opts));
       L.push('---', '');
@@ -1612,8 +1732,24 @@ ${ncxpts.join('\n')}
             : `# ${pack.name} · 共 ${pack.sessions.length} 段对话\n\n`) +
           `导出时间：${new Date(pack.exportedAt).toLocaleString('zh-CN')}\n\n` +
           (g.trim() ? `0. [00_开场白.md](00_%E5%BC%80%E5%9C%BA%E7%99%BD.md)　角色卡自带\n` : '') +
-          chapters.map((f, i) => `${(bt ? bt.seqBase : 0) + i + 1}. [${f.name}](${linkTarget(f.name)})　${pack.sessions[i].messageCount} 条`).join('\n') +
-          '\n',
+          chapters.map((f, i) => {
+            const s = pack.sessions[i];
+            // 一眼能看出「哪一段有问题」，不用一个个点开。这两条都是用户报过的症状：
+            // 1KB 的存档摘要、以及同一份记录被导两遍。
+            let mark = '';
+            if (s.fromArchiveOnly) mark += '　🔴 只有存档摘要（文件里有救法）';
+            if (s.mergedFrom && s.mergedFrom.length) mark += `　🔁 已合并 ${s.mergedFrom.length} 段重复的`;
+            return `${(bt ? bt.seqBase : 0) + i + 1}. [${f.name}](${linkTarget(f.name)})　${s.messageCount} 条${mark}`;
+          }).join('\n') +
+          '\n' +
+          (pack.sessions.some((s) => s.fromArchiveOnly)
+            ? '\n---\n\n' +
+              '## 🔴 有几段只拿到了存档摘要\n\n' +
+              '上面标了红点的那几段，接口一条对话都没给出来，文件里只有存档记下的那一问一答' +
+              '（所以只有 1KB 上下）。很久以前的存档特别容易这样。\n\n' +
+              '**救法**：去 mufy 里把那个存档**载入**，让它变成你当前正在聊的那段，' +
+              '然后重新导出这个角色 —— 载入之后接口就给得出全文了。（用户实测有效。）\n'
+            : ''),
         date: new Date(pack.exportedAt),
       });
 
@@ -1725,7 +1861,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.27</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.28</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -2053,7 +2189,33 @@ ${ncxpts.join('\n')}
           report(`   · 【${it.name}】${it.when ? it.when + ' 那段' : ''}　${it.reason}`);
         }
         report('   （对应文件的开头也有同样的红字，不用一个个点开找。）');
-        report('   多半是网络抖动。把对应角色单独重导一次通常就好了。');
+        // 只有真的是抓取失败才值得重跑；「接口说 N 条只给 M 条」已查实是 mufy 丢了数据，
+        // 让人重跑一遍只是白等（收尾话必须由这一轮真发生的事推出来）。
+        if ((opts.incompleteList || []).some((it) => /取失败|页数超过/.test(it.reason || ''))) {
+          report('   其中「取失败」的那几段多半是网络抖动，单独重导一次通常就好了。');
+        }
+      }
+
+      // 只拿到存档摘要的那几段（1KB 的小文件），和上面的「没导完整」不是一回事：
+      // 那边是抓了一半，这边是接口一条都不给。救法也完全不同，所以分开报。
+      if (opts.stubCount) {
+        report(`🔴 有 ${opts.stubCount} 段只拿到了存档摘要（文件只有 1KB 上下，里面只有一问一答）：`);
+        for (const it of opts.stubList || []) {
+          report(`   · 【${it.name}】${it.when ? it.when + ' 那段' : ''}${it.remark ? '「' + it.remark + '」' : ''}`);
+        }
+        report('   救法：去 mufy 里把这几个存档「载入」，让它变成当前正在聊的那段，');
+        report('   然后重新导出这个角色 —— 载入之后接口就给得出全文了。（用户实测有效。）');
+        report('   （对应文件的开头和 00_目录.md 里也写了同样的话。）');
+      }
+
+      // 同一份记录被导两遍的，合并了要说一声 —— 不然用户会以为少了几段。
+      if (opts.dupList && opts.dupList.length) {
+        report(`🔁 有 ${opts.dupList.length} 段和别的段内容完全相同，已合并，没有重复出文件：`);
+        for (const it of opts.dupList) {
+          report(`   · 【${it.name}】「${it.dropped}」＝「${it.kept}」`);
+        }
+        report('   通常是你在 mufy 里载入过某个存档，它同时又成了「最后一次聊天」，');
+        report('   一份记录走了两条路。合并只去掉重复的那一份，内容一个字没少。');
       }
 
       // 结尾的账要算清楚：成功几个、空的几个、失败几个，失败的是谁
