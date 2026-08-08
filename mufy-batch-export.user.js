@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.23.0
+// @version      1.24.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -464,33 +464,49 @@
   //    而且只在角落留一个 ⚠️。长对话才需要翻页，所以这个坑专挑长记录下手。
   //    现在：抓到多少留多少，并且明确记下「接口说有多少 / 实际拿到多少」。
   async function getDialogs(sessionId, characterId) {
-    const out = [];
-    let page = 1, expected = null, stopped = '';
-    // 实测接口不限于 100 条一页（试到 2000 都接受），而且 100/200/500 三种页大小
-    // 翻完得到的是同样的唯一 ID 集合、0 重复 0 漏掉 —— 偏移量是准的。
-    // 调大到 500：一万轮对话（约两万条）从 200 次请求降到 40 次，
-    // 暴露在网络抖动下的机会少 5 倍。就算服务端偷偷截短也不怕：
-    // 下面的循环是「没收够 total 就继续翻」，不依赖服务端一定给满。
-    const size = 500;
-    for (;;) {
-      let d;
-      try {
-        d = await api(
-          `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}&characterId=${encodeURIComponent(characterId)}` +
-            `&pageNum=${page}&pageSize=${size}`
-        );
-      } catch (e) {
-        stopped = `第 ${page} 页取失败：${e.message}`;
-        break;                       // ← 别抛，保住已经抓到的
+    // 按给定页大小把一段对话整个翻完。返回「抓到多少 / 接口说多少 / 为什么停」。
+    const fetchAll = async (size) => {
+      const out = [];
+      let page = 1, expected = null, stopped = '';
+      for (;;) {
+        let d;
+        try {
+          d = await api(
+            `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}&characterId=${encodeURIComponent(characterId)}` +
+              `&pageNum=${page}&pageSize=${size}`
+          );
+        } catch (e) {
+          stopped = `第 ${page} 页取失败：${e.message}`;
+          break;                       // ← 别抛，保住已经抓到的
+        }
+        const rows = (d && d.data) || [];
+        out.push(...rows);
+        if (expected === null && d && typeof d.total === 'number') expected = d.total;
+        if (!rows.length || (expected !== null && out.length >= expected) || (d && d.hasNext === false)) break;
+        page += 1;
+        if (page > 500) { stopped = '页数超过上限 500'; break; }
+        await sleep(120);
       }
-      const rows = (d && d.data) || [];
-      out.push(...rows);
-      if (expected === null && d && typeof d.total === 'number') expected = d.total;
-      if (!rows.length || (expected !== null && out.length >= expected) || (d && d.hasNext === false)) break;
-      page += 1;
-      if (page > 500) { stopped = '页数超过上限 500'; break; }
-      await sleep(120);
+      return { out, expected, stopped };
+    };
+
+    // 先用大页（500）翻：一万轮对话从 200 次请求降到 40 次，少 5 倍的网络抖动机会。
+    let r = await fetchAll(500);
+
+    // 🔴 少拿到了不要一次就认。有用户反馈「接口说共 1458 条、实际拿到 1000 条」，
+    //    1000 正好是 2×500 —— 如果服务端是按「页大小 500 只给两页」那样卡的，
+    //    换小页再翻一遍就能多捞回来；如果卡的是偏移量本身，那两次结果一样，
+    //    我们就照实报，不假装尽力了。合并按 dialogsId 去重，两次都不亏。
+    if (r.expected !== null && r.out.length < r.expected) {
+      const r2 = await fetchAll(100);
+      const seen = new Set(r.out.map((m) => m.dialogsId));
+      let added = 0;
+      for (const m of r2.out) if (!seen.has(m.dialogsId)) { seen.add(m.dialogsId); r.out.push(m); added += 1; }
+      if (added) r.stopped = '';
+      if (r2.stopped && !r.stopped && r.out.length < r.expected) r.stopped = r2.stopped;
     }
+
+    const out = r.out, expected = r.expected, stopped = r.stopped;
     out.sort((a, b) => new Date(a.createdTime || 0) - new Date(b.createdTime || 0));
 
     // 拿到的比接口说的少 —— 这就是「被吞了」，必须说出来，不能静默
@@ -499,7 +515,7 @@
       dialogs: out,
       expected,
       incomplete: !!(stopped || short),
-      reason: stopped || (short ? `接口说共 ${expected} 条，只取到 ${out.length} 条` : ''),
+      reason: stopped || (short ? `接口说共 ${expected} 条，只取到 ${out.length} 条（换小页重试过，还是这么多）` : ''),
     };
   }
 
@@ -932,6 +948,15 @@
       let err = r.incomplete ? r.reason : null;
       if (r.incomplete) {
         opts.incompleteCount = (opts.incompleteCount || 0) + 1;
+        // 光报个数量没用 —— 用户拿到「有 2 段没导完整」之后只能一个个文件点开找。
+        // 把是谁、哪一段、差多少记下来，结尾直接列出来。
+        (opts.incompleteList = opts.incompleteList || []).push({
+          name,
+          when: item.archives && item.archives.length
+            ? String(item.archives[0].createdAt || '').slice(0, 10)
+            : (dialogs.length ? String(dialogs[dialogs.length - 1].createdTime || '').slice(0, 10) : ''),
+          reason: r.reason,
+        });
         report(`  ⚠️ 不完整：${r.reason}`);
       }
 
@@ -1661,7 +1686,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.23</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.24</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1975,7 +2000,11 @@ ${ncxpts.join('\n')}
 
       // 不完整必须在结尾再喊一次 —— 中间那行 ⚠️ 早被后面几百行冲走了
       if (opts.incompleteCount) {
-        report(`🔴 有 ${opts.incompleteCount} 段没导完整（见各自文件开头的红字）。`);
+        report(`🔴 有 ${opts.incompleteCount} 段没导完整，分别是：`);
+        for (const it of opts.incompleteList || []) {
+          report(`   · 【${it.name}】${it.when ? it.when + ' 那段' : ''}　${it.reason}`);
+        }
+        report('   （对应文件的开头也有同样的红字，不用一个个点开找。）');
         report('   多半是网络抖动。把对应角色单独重导一次通常就好了。');
       }
 
