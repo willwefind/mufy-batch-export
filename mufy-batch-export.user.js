@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.29.0
+// @version      1.30.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -1672,10 +1672,10 @@ ${ncxpts.join('\n')}
       // 书架上显示的就是这一行，让它干干净净的。
       report(`【${pack.name}】做成电子书…`);
       const r = await buildEpub(pack, (n) => drawCover(pack.name, `${n} 章`));
-      if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return; }
+      if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return false; }
       downloadBlob(`${stem}${tag}.epub`, r.blob);
       report(`  ${r.chapters} 章 / ${r.total} 条　${(r.blob.size / 1048576).toFixed(2)} MB`);
-      return;
+      return true;
     }
 
     if (opts.shape === 'tavern') {
@@ -1689,7 +1689,9 @@ ${ncxpts.join('\n')}
           used.add(nm);
           return { name: nm, text: sessionToTavern(pack, s, opts), date: sessionTime(s) };
         });
-      if (!files.length) { report(`【${pack.name}】没有可导出的对话，跳过。`); return; }
+      // 酒馆这条路故意不放开场白（首条来自卡自己的 first_mes，塞进去会重复），
+      // 所以「只有开场白」的角色在这里是真的没东西可导 —— 照实说，别谎报成功。
+      if (!files.length) { report(`【${pack.name}】没有可导出的对话，跳过。`); return false; }
 
       files.unshift({
         name: '00_导入说明.md',
@@ -1716,7 +1718,7 @@ ${ncxpts.join('\n')}
       report(`【${pack.name}】打包 ${files.length} 个文件…`);
       const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
       downloadBlob(base + '_酒馆.zip', zip);
-      return;
+      return true;
     }
 
     if (opts.split) {
@@ -1791,9 +1793,11 @@ ${ncxpts.join('\n')}
       report(`【${pack.name}】打包 ${files.length} 个文件…`);
       const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
       downloadBlob(base + '.zip', zip);
+      return true;
     } else {
       download(base + '.md', toMarkdown(pack, opts));
       if (opts.json) download(base + '.json', JSON.stringify(pack, null, 2));
+      return true;
     }
   }
 
@@ -1892,7 +1896,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.29</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.30</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -2160,9 +2164,11 @@ ${ncxpts.join('\n')}
             // 分批：每批只抓这一批的对话，打包完就放掉再抓下一批。
             // 关键是「抓」也要分批 —— 只切 ZIP 的话，全部对话还是会先整个进内存。
             let from = 0, total = null, done = 0, msgs = 0, name = t.name || t.id;
+            let lastPack = null;   // 一段都没导成时，可能还剩个开场白要留（见下面）
             for (;;) {
               const pack = await collectCharacter(t.id, opts, report, opts.chunk, t.live, from);
               name = pack.name;
+              lastPack = pack;
               if (total === null) total = pack.totalSessions;
               if (pack.sessions.length) {
                 // 用槽位范围而不是 pack.sessions.length：空段会被过滤掉，
@@ -2178,21 +2184,47 @@ ${ncxpts.join('\n')}
               from += opts.chunk;
               if (from >= total) break;
             }
-            if (!done) { report(`【${name}】没有可导出的对话，跳过。`); emptyCount += 1; }
+            if (!done) {
+              // 分批这条路同理：没有一段对话，但开场白还在的话，照样给她留一份。
+              // 这里的 pack 没有 batch 标签，出来就是个普通的包，不带「第几到第几段」。
+              if (lastPack && (lastPack.greeting || '').trim() && await emit(lastPack, opts, ts, report)) {
+                report(`✅ [${seq}/${totalIds}] 【${name}】没有对话，只有开场白 —— 也给你留了一份`);
+                okCount += 1;
+              } else {
+                report(`【${name}】没有可导出的对话，跳过。`);
+                emptyCount += 1;
+              }
+            }
             else {
               report(`✅ [${seq}/${totalIds}] 【${name}】已导出 ${done} 段对话 / ${msgs} 条消息（分 ${Math.ceil(total / opts.chunk)} 批）`);
               okCount += 1;
             }
           } else {
           const pack = await collectCharacter(t.id, opts, report, null, t.live);
-          if (!pack.sessions.length) {
+          // 🔴 一段对话都没有，不代表没东西可留：**角色卡自带的开场白也是记录**
+          //    （实测有角色的开场白 2900 字，是完整的一幕场景）。
+          //    以前这里只看 sessions.length 就跳过，把这类角色整个丢掉了 ——
+          //    而更早的版本是会出包的，等于我们把它悄悄弄丢了一次。
+          //    ⚠️ 别改成「有开场白就一定出包」：酒馆那条路故意不放开场白
+          //    （首条来自卡自己的 first_mes，塞进去会重复），所以那种输出下
+          //    只有开场白＝真的没东西可导，emit 里自己会说明并跳过。
+          if (!pack.sessions.length && !(pack.greeting || '').trim()) {
             report(`【${pack.name}】没有可导出的对话，跳过。`);
             emptyCount += 1;
           } else {
-            await emit(pack, opts, ts, report);
+            // 🔴 成没成要问 emit，别自己假定。酒馆那条路对「只有开场白」的角色
+            //    什么都不产出，这里如果照旧报成功就是谎报（本项目栽过三次的那类错）。
+            const made = await emit(pack, opts, ts, report);
             const msgs = pack.sessions.reduce((n, s) => n + s.messageCount, 0);
-            report(`✅ [${seq}/${totalIds}] 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
-            okCount += 1;
+            if (!made) {
+              emptyCount += 1;                       // emit 自己已经说明了原因
+            } else if (!pack.sessions.length) {
+              report(`✅ [${seq}/${totalIds}] 【${pack.name}】没有对话，只有开场白 —— 也给你留了一份`);
+              okCount += 1;
+            } else {
+              report(`✅ [${seq}/${totalIds}] 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
+              okCount += 1;
+            }
           }
           }
         } catch (e) {
