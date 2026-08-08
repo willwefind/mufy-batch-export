@@ -12,6 +12,23 @@
   src:local('京華老宋体_KingHwa_OldSong'), local('京華老宋体'), url('kinghwa.ttf') format('truetype');
   font-weight:200 400; font-display:swap;
 }
+/* 这三款本仓不附带字体文件（不代第三方字体做分发）。
+   你自己系统里装了同名字体就会自动用上，没装就退到后面的系统字，功能不受影响。 */
+@font-face{
+  font-family:'ZcoolXiaoWei';
+  src:local('ZCOOL XiaoWei'), local('站酷小薇');
+  font-display:swap;
+}
+@font-face{
+  font-family:'ZcoolQingKe';
+  src:local('ZCOOL QingKe HuangYou'), local('站酷庆科黄油体');
+  font-display:swap;
+}
+@font-face{                                   /* 朝華，B 是秀丽克制的那支，适合正文 */
+  font-family:'ChaohuaB';
+  src:local('朝華標題明朝體B'), local('ChaohuaB');
+  font-display:swap;
+}
 :root{
   --bg:#17120e; --bg2:#1f1811; --ink:#efe4d4; --dim:#c3b39a; --faint:#8b7d6b;
   --glow:#e8a94e; --line:rgba(232,169,78,.16); --panel:rgba(31,24,17,.72);
@@ -26,14 +43,34 @@
   --bg:#22242a; --bg2:#2a2d34; --ink:#dfe3e9; --dim:#aeb5bf; --faint:#7e8590;
   --glow:#7fa6d0; --line:rgba(127,166,208,.18); --panel:rgba(42,45,52,.75);
 }
-/* 「灰报纸」配色 */
+/* ── 护眼向的几套 ──
+   共同点：底色不用纯白（白底黑字对比过强，久读发涩），字色不用纯黑，
+   两者的明度差控制在「看得清但不刺」的区间。 */
+:root[data-theme=bean]{        /* 豆沙绿：最经典的一套，白天久读用这个 */
+  --bg:#cfe0cd; --bg2:#d9e7d7; --ink:#2b332b; --dim:#4f5a4e; --faint:#7c877a;
+  --glow:#4a7a52; --line:rgba(74,122,82,.22); --panel:rgba(217,231,215,.86);
+}
+:root[data-theme=parch]{       /* 羊皮纸：比「昼」更黄更暖，夜里开小灯不刺眼 */
+  --bg:#e9dcc0; --bg2:#f1e7d2; --ink:#3a2f22; --dim:#63533f; --faint:#8e7c63;
+  --glow:#9a6b28; --line:rgba(154,107,40,.22); --panel:rgba(241,231,210,.86);
+}
+:root[data-theme=mist]{        /* 冷灰蓝：低对比，阴天和傍晚很舒服 */
+  --bg:#dde3e8; --bg2:#e7ecf0; --ink:#2f3740; --dim:#556069; --faint:#828d97;
+  --glow:#3f6d94; --line:rgba(63,109,148,.2); --panel:rgba(231,236,240,.88);
+}
+:root[data-theme=oled]{        /* 纯黑：深夜关灯用，底接近全黑、字压到柔和的米 */
+  --bg:#000; --bg2:#0b0b0c; --ink:#d6d0c6; --dim:#9c968c; --faint:#6b665e;
+  --glow:#c9a063; --line:rgba(201,160,99,.16); --panel:rgba(11,11,12,.86);
+}
+
+/* 「白」：偏灰的纸面配色 */
 :root[data-theme=paper]{
   --bg:#eaeae9; --bg2:#e6e6e6; --ink:#000; --dim:#4a4a4a; --faint:#8a8a8a;
   --glow:#c7710c; --line:rgba(200,200,200,1); --panel:rgba(245,245,245,.94);
   --serif:'KingHwaOldSong','京華老宋体',serif;
   --quote:rgba(199,113,12,.81); --ital:rgba(185,32,11,.84); --under:rgba(19,72,121,.68);
 }
-/* 报纸皮：正文纸面 + 极淡纸纹 */
+/* 「白」皮：正文纸面 + 极淡纸纹 */
 :root[data-theme=paper] body{
   background-image:
     radial-gradient(circle at 17% 23%, rgba(0,0,0,.022) 0 1px, transparent 1px),
@@ -107,6 +144,8 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
               border-left:2px solid var(--line);padding-left:18px}
 :root[data-hideme="1"] .msg.me{display:none}  /* ⚠️ 这个 "1" 必须带引号：CSS 属性选择器的值只能是标识符或字符串，而标识符不能以数字开头。写成 [data-hideme=1] 整条规则会被解析器直接丢掉——按钮照点、属性照设、文字照变，就是不生效（真踩过，用户报「点了完全没反应」）。 */
 #nav{max-width:var(--cw);margin:0 auto;padding:0 32px 90px;display:flex;gap:12px}
+#pgind{flex:0 0 auto;align-self:center;color:var(--faint);font-size:12.5px;letter-spacing:.05em;
+  min-width:72px;text-align:center;user-select:none}
 #nav button{flex:1;padding:13px;border-radius:12px;cursor:pointer;font-family:inherit;font-size:13.5px;
             background:rgba(232,169,78,.08);color:var(--dim);border:1px solid var(--line)}
 #nav button:hover:not(:disabled){color:var(--glow);border-color:var(--glow)}
@@ -149,20 +188,44 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
     <select id="cw"><option value="620">窄</option><option value="720" selected>中</option><option value="880">宽</option></select>
     <select id="ff">
       <option value="'KingHwaOldSong','京華老宋体',serif" selected>京華老宋</option>
+      <option value="'ZcoolXiaoWei','ZCOOL XiaoWei',serif">站酷小薇</option>
+      <option value="'ChaohuaB','Songti SC','SimSun',serif">朝華正文</option>
+      <option value="'ZcoolQingKe','ZCOOL QingKe HuangYou',sans-serif">庆科黄油</option>
       <option value='"Noto Serif SC","Source Han Serif SC","STSong","SimSun",serif'>思源宋</option>
       <option value='"KaiTi","STKaiti","楷体",serif'>楷体</option>
+      <option value='"FangSong","STFangsong","仿宋",serif'>仿宋</option>
       <option value='"STSong","SimSun","宋体",serif'>宋体</option>
-      <option value='"Microsoft YaHei","微软雅黑",sans-serif'>雅黑</option>
+      <option value='"Microsoft YaHei","微软雅黑","PingFang SC",sans-serif'>雅黑</option>
+      <option value='"DengXian","等线","PingFang SC",sans-serif'>等线</option>
     </select>
-    <select id="th"><option value="paper" selected>报纸</option><option value="night">夜</option><option value="day">昼</option><option value="grey">灰</option></select>
+    <select id="th">
+      <option value="paper" selected>白</option>
+      <option value="bean">豆沙绿</option>
+      <option value="parch">羊皮纸</option>
+      <option value="mist">冷灰蓝</option>
+      <option value="day">昼</option>
+      <option value="grey">灰</option>
+      <option value="night">夜</option>
+      <option value="oled">纯黑</option>
+    </select>
+    <select id="pg" title="长存档是一页页翻，还是一路往下滑">
+      <option value="page" selected>分页</option>
+      <option value="scroll">滚动</option>
+    </select>
+    <select id="ps" title="一页大约多少字（只在分页模式下有用）">
+      <option value="short">页短</option>
+      <option value="mid" selected>页中</option>
+      <option value="long">页长</option>
+    </select>
     <button id="hideme" title="RP 记录里你的发言常常是指令，藏起来更像读小说">隐藏我的发言</button>
     <button id="hidesys" title="记忆区的「规则：…」「AI填充：…」是给模型看的脚手架，不是正文">已藏脚手架</button>
   </div>
 
   <div id="page"></div>
   <div id="nav">
-    <button id="prev" disabled>← 上一章</button>
-    <button id="next" disabled>下一章 →</button>
+    <button id="prev" disabled>← 上一段</button>
+    <span id="pgind"></span>
+    <button id="next" disabled>下一段 →</button>
   </div>
 
   <div id="empty">
@@ -312,12 +375,19 @@ function tidy(t) {
 
 // 卡里给模型看的脚手架（记忆区规则、待填充占位）——读小说时是纯噪音。
 // 只删「明确是指令」的行，不碰剧情；关掉开关就能看到完整原文。
+const MACHINERY = /\[\s*(规则|AI\s*填充)\s*[:：]|待生成|【\s*规则\s*】/;
 function dropMachinery(t) {
   return t.split('\n')
-    .filter(l => !/\[\s*(规则|AI\s*填充)\s*[:：]|待生成|【\s*规则\s*】/.test(l))
+    .filter(l => !MACHINERY.test(l))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+// 数一数这一段里有多少行会被藏掉 —— 用同一条判据，免得「说藏了 N 行」和实际删的对不上
+function countMachinery(t) {
+  let n = 0;
+  for (const l of t.split('\n')) if (MACHINERY.test(l)) n += 1;
+  return n;
 }
 
 const esc = s => String(s).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
@@ -326,7 +396,7 @@ const esc = s => String(s).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', 
    状态
    ══════════════════════════════════════════════════════════ */
 
-const S = { chars: [], cur: -1, pack: null, cap: -1 };
+const S = { chars: [], cur: -1, pack: null, cap: -1, page: 0, mode: 'page' };
 const $ = id => document.getElementById(id);
 
 function toast(msg, ms = 1800) {
@@ -499,7 +569,17 @@ async function openChar(i) {
     }
     S.cur = i; S.cap = -1;
     renderList();
-    openCap(0);
+    // 上次读到哪就回到哪 —— 这个位置一直在存，但以前没人读它，等于白存
+    let at = { cap: 0, page: 0 };
+    try {
+      const last = JSON.parse(localStorage.getItem('mufyReader.last') || '{}');
+      if (last.name === S.pack.name && Number.isInteger(last.cap)
+          && last.cap >= 0 && last.cap < S.pack.sessions.length) {
+        at = { cap: last.cap, page: last.page || 0 };
+      }
+    } catch (e) {}
+    openCap(at.cap, at.page);
+    if (at.cap || at.page) toast('回到上次读到的地方');
   } catch (err) {
     $('title').textContent = c.name;
     $('page').innerHTML = `<h2>打不开</h2><div class="meta">${esc(c.key || c.name)}</div>
@@ -508,7 +588,41 @@ async function openChar(i) {
   }
 }
 
-function openCap(j) {
+/* 把一段对话洗成「可以直接渲染的条目」，顺便数清楚藏了多少行脚手架。
+   之所以要数：藏脚手架这个开关在大部分角色身上什么都不做（实测 200 多个角色里
+   只有 20 来个真有这种行），不告诉你「这一段藏了几行」，你根本没法判断它有没有在工作。 */
+function prepCap(s) {
+  const hideSys = root.dataset.hidesys !== '0';
+  const items = [];
+  let dropped = 0;
+  for (const m of s.dialogs || []) {
+    let body = tidy(contentToText(m.content));
+    if (hideSys) {
+      dropped += countMachinery(body);
+      body = dropMachinery(body);
+    }
+    if (!body) continue;
+    items.push({ m, body });
+  }
+  return { items, dropped };
+}
+
+/* 分页：按「这一页大约多少字」切，而不是按条数切 ——
+   RP 的一条可能是 80 字也可能是 3000 字，按条数切出来的页长短会差十几倍。 */
+const PAGE_CHARS = { short: 2500, mid: 5000, long: 9000 };
+function paginate(items) {
+  if (S.mode !== 'page') return [items];
+  const cap = PAGE_CHARS[$('ps') ? $('ps').value : 'mid'] || 5000;
+  const out = []; let cur = [], n = 0;
+  for (const it of items) {
+    cur.push(it); n += it.body.length;
+    if (n >= cap) { out.push(cur); cur = []; n = 0; }
+  }
+  if (cur.length) out.push(cur);
+  return out.length ? out : [[]];
+}
+
+function openCap(j, page) {
   const p = S.pack; if (!p || !p.sessions[j]) return;
   S.cap = j;
   const s = p.sessions[j];
@@ -519,31 +633,57 @@ function openCap(j) {
     : (s.archives && s.archives.length
         ? new Date(s.archives[0].createdAt).toLocaleString('zh-CN')
         : '未存档的最后一段');
+
+  const { items, dropped } = prepCap(s);
+  const pages = paginate(items);
+  // page 传 -1 表示「要这一段的最后一页」（从后一段往回翻时用）
+  S.page = page === -1 ? pages.length - 1 : Math.max(0, Math.min(page || 0, pages.length - 1));
+
   const parts = [
     `<h2>${esc(capTitle(s, j).replace(/^\d+\.\s*/, ''))}</h2>`,
-    `<div class="meta">${esc(p.name)}　·　第 ${j + 1} / ${p.sessions.length} 段　·　${s.messageCount} 条　·　${esc(when)}</div>`
+    `<div class="meta">${esc(p.name)}　·　第 ${j + 1} / ${p.sessions.length} 段　·　${s.messageCount} 条　·　${esc(when)}`
+      + (pages.length > 1 ? `　·　第 ${S.page + 1} / ${pages.length} 页` : '')
+      + (dropped ? `　·　已藏 ${dropped} 行脚手架` : '')
+      + `</div>`
   ];
-  const hideSys = root.dataset.hidesys !== '0';   // 默认藏起脚手架
-  for (const m of s.dialogs || []) {
-    let body = tidy(contentToText(m.content));
-    if (hideSys) body = dropMachinery(body);
-    if (!body) continue;
-    const me = m.role === 'user';
-    const t = m.createdTime ? new Date(m.createdTime).toLocaleString('zh-CN') : '';
+  for (const it of pages[S.page]) {
+    const me = it.m.role === 'user';
+    const t = it.m.createdTime ? new Date(it.m.createdTime).toLocaleString('zh-CN') : '';
     parts.push(`<div class="msg ${me ? 'me' : 'ta'}">
       <div class="who">${me ? '我' : esc(p.name)}　${t}</div>
-      <div class="body">${esc(body)}</div></div>`);
+      <div class="body">${esc(it.body)}</div></div>`);
   }
   $('page').innerHTML = parts.join('');
-  $('prev').disabled = j <= 0;
-  $('next').disabled = j >= p.sessions.length - 1;
+
+  // 翻页按钮：本段还有页就翻页，翻到头了就滚到相邻的一段（像翻书那样连着）
+  const lastPage = pages.length - 1;
+  const hasPrev = S.page > 0 || j > 0;
+  const hasNext = S.page < lastPage || j < p.sessions.length - 1;
+  $('prev').disabled = !hasPrev;
+  $('next').disabled = !hasNext;
+  $('prev').textContent = S.page > 0 ? '← 上一页' : '← 上一段';
+  $('next').textContent = S.page < lastPage ? '下一页 →' : '下一段 →';
+  $('pgind').textContent = pages.length > 1
+    ? `${S.page + 1} / ${pages.length} 页`
+    : (S.mode === 'page' ? '就这一页' : '');
+
   $('main').scrollTop = 0;
   renderList();
-  localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, cap: j }));
+  localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, cap: j, page: S.page }));
 }
 
-$('prev').onclick = () => openCap(S.cap - 1);
-$('next').onclick = () => openCap(S.cap + 1);
+function goPrev() {
+  if (S.page > 0) return openCap(S.cap, S.page - 1);
+  if (S.cap > 0) return openCap(S.cap - 1, -1);     // 回到上一段的最后一页
+}
+function goNext() {
+  const p = S.pack; if (!p) return;
+  const pages = paginate(prepCap(p.sessions[S.cap]).items);
+  if (S.page < pages.length - 1) return openCap(S.cap, S.page + 1);
+  if (S.cap < p.sessions.length - 1) return openCap(S.cap + 1, 0);
+}
+$('prev').onclick = goPrev;
+$('next').onclick = goNext;
 
 /* ── 阅读设置 ── */
 const root = document.documentElement;
@@ -565,15 +705,19 @@ $('hidesys').onclick = () => {
   root.dataset.hidesys = root.dataset.hidesys === '0' ? '1' : '0';
   $('hidesys').textContent = root.dataset.hidesys === '0' ? '显示脚手架' : '已藏脚手架';
   save();
-  if (S.cap >= 0) openCap(S.cap);
+  if (S.cap >= 0) openCap(S.cap, S.page);
 };
+// 分页 / 滚动 切换：留在原来那一段，回到第一页
+$('pg').onchange = e => { S.mode = e.target.value; save(); if (S.cap >= 0) openCap(S.cap, 0); };
+$('ps').onchange = () => { save(); if (S.cap >= 0) openCap(S.cap, 0); };
 $('toggle').onclick = () => $('side').classList.toggle('hide');
 
 function save() {
   localStorage.setItem('mufyReader.prefs', JSON.stringify({
     fs, lh: $('lh').value, cw: $('cw').value, ff: $('ff').value,
     th: $('th').value, hideme: root.dataset.hideme || '',
-    hidesys: root.dataset.hidesys || '1'
+    hidesys: root.dataset.hidesys || '1',
+    pg: $('pg').value, ps: $('ps').value
   }));
 }
 (function load() {
@@ -586,6 +730,8 @@ function save() {
     if (p.th) { $('th').value = p.th; root.dataset.theme = p.th; }
     if (p.hideme) { root.dataset.hideme = '1'; $('hideme').textContent = '显示我的发言'; }
     if (p.hidesys === '0') { root.dataset.hidesys = '0'; $('hidesys').textContent = '显示脚手架'; }
+    if (p.pg) { $('pg').value = p.pg; S.mode = p.pg; }
+    if (p.ps) { $('ps').value = p.ps; }
   } catch (e) {}
   bootFromCache();     // 有缓存就直接开，不用选文件
 })();
@@ -610,8 +756,8 @@ function save() {
 
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-  if (e.key === 'ArrowRight' && !$('next').disabled) openCap(S.cap + 1);
-  if (e.key === 'ArrowLeft' && !$('prev').disabled) openCap(S.cap - 1);
+  if (e.key === 'ArrowRight' && !$('next').disabled) goNext();
+  if (e.key === 'ArrowLeft' && !$('prev').disabled) goPrev();
   if (e.key === 'Escape') $('side').classList.toggle('hide');
 });
 </script>
