@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.31.0
+// @version      1.32.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -972,7 +972,9 @@
     //    所以批内顺序与整体一致。
     const preTime = (it) =>
       it.archives && it.archives.length ? new Date(it.archives[0].createdAt).getTime() || 0 : Infinity;
-    list.sort((a, b) => preTime(b) - preTime(a));
+    // 排序方向跟着 opts.oldestFirst 走：分批是在这一步之后切的，
+    // 所以把方向定在这里，批次范围、书名里的「第几到第几段」、段号才会全都一致。
+    list.sort((a, b) => (opts.oldestFirst ? preTime(a) - preTime(b) : preTime(b) - preTime(a)));
     const totalSessions = list.length;
     const from = offset || 0;
     if (limit) list = list.slice(from, from + limit);
@@ -1117,8 +1119,8 @@
       kept = survivors;
     }
 
-    // 新的排前面
-    kept.sort((a, b) => sessionTime(b) - sessionTime(a));
+    // 默认新的排前面（备份场景：查最近的最方便）；电子书那条路反过来，按时间正序
+    kept.sort((a, b) => (opts.oldestFirst ? sessionTime(a) - sessionTime(b) : sessionTime(b) - sessionTime(a)));
 
     // 🔴 「一段都没留下」有两种，性质完全不同，不许混为一谈：
     //    ① 从没点开过这个角色 —— 那连 session 都不会有，走不到这儿；
@@ -1935,7 +1937,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.31</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.32</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -2086,6 +2088,14 @@ ${ncxpts.join('\n')}
       shape,
       split: shape === 'split',
       chunk: Math.max(0, parseInt($('mufyx-chunk').value, 10) || 0),
+      // 🔑 只有电子书按时间正序（旧 → 新）。
+      //    书是从第一页开始读的 —— 有用户拿到书翻开第一章，看到的是最近那段，
+      //    以为「最前面的聊天记录消失了」，其实它在最后一章。
+      //    ZIP 保持「新 → 旧」不变：那是备份，查最近的最方便，
+      //    而且 00_目录.md 里本来就写明了排序规则。
+      //    ⚠️ 这个开关要在**排序**这一步生效，不能只在渲染时把章节倒过来 ——
+      //    否则分批导出时「书内正序、书与书之间倒序」，更乱。
+      oldestFirst: shape === 'epub',
     };
     const scope = $('mufyx-scope').value;
 
