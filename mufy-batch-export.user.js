@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.28.0
+// @version      1.29.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -919,6 +919,12 @@
     return br > ar ? b : a;
   }
 
+  // 一批里最多攥多少字。超过就主动停手，别等浏览器杀进程（见下面 collectCharacter 里的说明）。
+  // 4000 万字 ≈ 内存里 80MB 的字符串，而渲染 Markdown 还要再复制一份、打包又要一份，
+  // 所以真实占用是这个数的三倍上下——已经贴着桌面浏览器的天花板了。
+  // 只在「一批」的范围内计数：填了分批就自然不会撞到，这道闸是给没分批的人兜底的。
+  const TOO_BIG_CHARS = 40000000;
+
   // ---------- 组装一个角色的导出内容 ----------
   // liveSessionId = 角色列表里的 lastSessionId，也就是这个角色"活着的"那段对话。
   // ⚠️ 只走存档列表会漏掉它：你聊过但从没按"保存"的对话，存档接口根本不列。
@@ -976,6 +982,7 @@
 
     const sessions = [];
     let i = 0;
+    let acc = 0;              // 这一批已经攥在手里的正文字数
     for (const item of list) {
       i += 1;
       report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…`);
@@ -1037,6 +1044,28 @@
         messageCount: dialogs.length,
         dialogs,
       });
+
+      // 🔴 在浏览器把整个标签页干掉之前先停手。
+      //    有用户一万轮 / 178 段，而且每轮都手工粘了几万字的长期记忆——
+      //    抓到第 40 段左右**渲染进程直接被杀**（浏览器自己弹「此页存在问题 / Out of Memory」）。
+      //    进程一死，我们的 try/catch、日志、面板全都没了，
+      //    「内存不够就填分批」这句话根本没机会说出口。所以必须**主动**停。
+      //    判据用「攥在手里的字数」而不是「段数」：段多但每段很小是完全没问题的
+      //    （实测 53 段一次导没事），真正撑爆浏览器的是内容体量。
+      acc += dialogs.reduce((n, d) => n + (typeof d.content === 'string'
+        ? d.content.length
+        : (d.content ? JSON.stringify(d.content).length : 0)), 0);
+      if (acc > TOO_BIG_CHARS) {
+        const 万 = Math.round(acc / 10000);
+        throw new Error(
+          `这个角色太大了：才抓到第 ${i} 段就已经有约 ${万} 万字堆在内存里，` +
+          `再往下多半会把整个标签页撑爆（浏览器直接崩，连日志都留不下）。` +
+          (opts.chunk
+            ? `你已经填了「每包最多 ${opts.chunk} 段」，请再调小一点（比如 ${Math.max(1, Math.floor(opts.chunk / 2))}）。`
+            : `请在面板的「每包最多多少段对话」里填 5 再导一次——` +
+              `它会改成一批批地抓、抓完打包就放掉，内存峰值只跟一批有关。`)
+        );
+      }
       await sleep(150);
     }
 
@@ -1863,7 +1892,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.28</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.29</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
