@@ -105,7 +105,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
 .body{font-size:var(--fs);line-height:var(--lh);white-space:pre-wrap;word-break:break-word}
 .msg.me .body{color:var(--dim);font-size:calc(var(--fs) - 1.5px);
               border-left:2px solid var(--line);padding-left:18px}
-:root[data-hideme=1] .msg.me{display:none}
+:root[data-hideme="1"] .msg.me{display:none}  /* ⚠️ 这个 "1" 必须带引号：CSS 属性选择器的值只能是标识符或字符串，而标识符不能以数字开头。写成 [data-hideme=1] 整条规则会被解析器直接丢掉——按钮照点、属性照设、文字照变，就是不生效（真踩过，用户报「点了完全没反应」）。 */
 #nav{max-width:var(--cw);margin:0 auto;padding:0 32px 90px;display:flex;gap:12px}
 #nav button{flex:1;padding:13px;border-radius:12px;cursor:pointer;font-family:inherit;font-size:13.5px;
             background:rgba(232,169,78,.08);color:var(--dim);border:1px solid var(--line)}

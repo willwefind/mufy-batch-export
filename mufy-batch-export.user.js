@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.21.0
+// @version      1.22.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -238,7 +238,10 @@
     if (document.visibilityState === 'visible' && !wakeLock) acquireWakeLock(null);
   };
 
+  let downloadCount = 0; // 这一轮到底真的产出了几个文件
+
   function downloadBlob(filename, blob) {
+    downloadCount += 1;
     const url = URL.createObjectURL(blob);
     // 先把文件名和大小记进日志再点 —— 以后有人反馈「说完成了却没文件」，
     // 一看日志就知道是「压根没生成」还是「生成了但浏览器没收下」。
@@ -1619,7 +1622,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.21</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.22</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1725,6 +1728,21 @@ ${ncxpts.join('\n')}
     $('mufyx-go').onclick = () => run(panel);
   }
 
+  // 结尾必须按「这一轮到底产出了几个文件」说话。
+  // 有用户反馈「面板说导出完成了，但下载列表里什么都没有」——
+  // 其中一种情况就是这一轮**压根没产出文件**（比如那个角色的存档都看不到了），
+  // 而旧文案不管三七二十一都说「文件在下载目录里」，等于在骗人。
+  function reportFinish(report) {
+    if (downloadCount === 0) {
+      report('⚠️ 这次没有产生任何文件。');
+      report('   上面的日志会说明原因：常见是「没有可导出的对话」——');
+      report('   没有会员时，过期的历史存档在 mufy 那边就看不到了，接口也不会返回，脚本拿不到。');
+      return;
+    }
+    report(`全部完成，本次产出 ${downloadCount} 个文件，在浏览器的下载目录里。`);
+    report('   （下载列表里没有？面板底部有「⬇ 手动保存」可以补存。）');
+  }
+
   async function run(panel) {
     const $ = (id) => panel.querySelector('#' + id);
     const log = $('mufyx-log');
@@ -1748,6 +1766,7 @@ ${ncxpts.join('\n')}
 
     goBtn.disabled = true;
     lines.length = 0;
+    downloadCount = 0;
 
     // 导出期间别让屏幕熄。有安卓用户反馈「导全部角色时息屏几次之后就直接被踢出去了」——
     // 手机息屏/切后台之后系统会回收标签页，导出当场断。
@@ -1766,7 +1785,7 @@ ${ncxpts.join('\n')}
         const cards = await getMyCards(report);
         if (!cards.length) throw new Error('没找到你创建的角色卡。');
         await emitCards(cards, opts, stamp(), report);
-        report('全部完成。文件在浏览器的下载目录里。');
+        reportFinish(report);
         return;
       }
 
@@ -1781,7 +1800,7 @@ ${ncxpts.join('\n')}
         opts.maskNote = maskShortfallNote(masks.length, got.total, got.truncated);
         if (opts.maskNote) report('🔴 ' + opts.maskNote);
         await emitMasks(masks, opts, stamp(), report);
-        report('全部完成。文件在浏览器的下载目录里。');
+        reportFinish(report);
         return;
       }
 
@@ -1893,7 +1912,7 @@ ${ncxpts.join('\n')}
       if (seq < totalIds) {
         report(`⏸ 只跑到第 ${seq} 个（共 ${totalIds} 个）。下次把「从第几个角色开始」填 ${seq + 1}。`);
       }
-      report('全部完成。文件在浏览器的下载目录里。');
+      reportFinish(report);
     } catch (e) {
       report('❌ ' + e.message);
     } finally {
