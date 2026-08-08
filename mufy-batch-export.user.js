@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.20.0
+// @version      1.21.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -1372,6 +1372,39 @@ ${ncxpts.join('\n')}
   }
 
   // ---------- 落盘 ----------
+  // ---------- 酒馆对话格式 ----------
+  // 一段存档 = 一个 .jsonl 文件，和酒馆「一个角色下多个对话」的语义正好对上。
+  // 格式是照真实的酒馆对话文件抄的（不是照文档猜的）：
+  //   第 1 行  {"user_name":..., "character_name":..., "chat_metadata":{}}
+  //   之后每行 {"name","is_user","is_system","send_date","mes","extra"}
+  // 真文件里还有 swipe_id / swipes / swipe_info（swipe 过才有）以及扩展塞的字段，
+  // 那些不是必需的，我们不编。
+  //
+  // ⚠️ **不放开场白**：酒馆的第一条消息来自角色卡的 first_mes，
+  //    我们再塞一条进去就会出现两次。
+  function sessionToTavern(pack, s, opts) {
+    const userName = 'You';
+    const head = JSON.stringify({
+      user_name: userName,
+      character_name: pack.name,
+      chat_metadata: {},
+    });
+    const rows = (s.dialogs || []).map((d) => {
+      const isUser = d.role === 'user';
+      let text = contentToText(d.content);
+      if (opts.tidy) text = tidy(text);
+      return JSON.stringify({
+        name: isUser ? userName : pack.name,
+        is_user: isUser,
+        is_system: false,
+        send_date: d.createdTime || new Date(pack.exportedAt).toISOString(),
+        mes: text,
+        extra: {},
+      });
+    });
+    return [head, ...rows].join('\n') + '\n';
+  }
+
   async function emit(pack, opts, ts, report) {
     // 重名角色真的存在（同一个名字下挂着两个不同的 characterId，实测遇到过好几对）。
     // 不加区分的话两个包会撞名，靠浏览器补 " (1)"，事后根本分不出谁是谁。
@@ -1396,6 +1429,47 @@ ${ncxpts.join('\n')}
       if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return; }
       downloadBlob(`${stem}.epub`, r.blob);
       report(`  ${r.chapters} 章 / ${r.total} 条　${(r.blob.size / 1048576).toFixed(2)} MB`);
+      return;
+    }
+
+    if (opts.shape === 'tavern') {
+      const used = new Set();
+      const files = pack.sessions
+        .filter((s) => (s.dialogs || []).length)
+        .map((s, i) => {
+          const slug = fileSlug(s);
+          let nm = `${String(i + 1).padStart(2, '0')}_${stamp(sessionTime(s))}${slug ? '_' + slug : ''}.jsonl`;
+          while (used.has(nm)) nm = nm.replace(/\.jsonl$/, '_.jsonl');
+          used.add(nm);
+          return { name: nm, text: sessionToTavern(pack, s, opts), date: sessionTime(s) };
+        });
+      if (!files.length) { report(`【${pack.name}】没有可导出的对话，跳过。`); return; }
+
+      files.unshift({
+        name: '00_导入说明.md',
+        text:
+          `# ${pack.name} · 导入酒馆\n\n` +
+          `这里是 ${files.length} 段对话，一段一个 \`.jsonl\`，都是酒馆的对话格式。\n\n` +
+          `## 怎么导\n\n` +
+          `1. 先在酒馆里**建好这个角色的卡**（名字建议和这里一致）。\n` +
+          `2. 选中那个角色 → 对话列表 → **导入对话**，选一个 \`.jsonl\`。\n` +
+          `3. 一段存档一个文件，想导几段就导几段；酒馆本来就支持一个角色挂多个对话。\n\n` +
+          `## 三件要先知道的事\n\n` +
+          `- **没有放开场白。** 酒馆的第一条消息来自角色卡自己的开场白，\n` +
+          `  这里再塞一条就会重复。角色卡的开场白原文在同一次导出的 ZIP 里（\`00_开场白.md\`）。\n` +
+          `- **模型只看得到最近的一段。** 导进去几千条，模型也只读得到能塞进上下文的那些，\n` +
+          `  更早的对你是存档、对它不是记忆。要让它记住早期设定，用酒馆的总结／作者注释／世界书。\n` +
+          `- **角色不会一模一样。** mufy 那边的语气是人设＋小剧场＋输出设定＋正则＋那边的模型\n` +
+          `  一起长出来的；换了模型，就算人设一字不差贴过去口吻也会变。\n` +
+          `  聊天记录本身是最有效的"定调"手段（模型会照着已有对话模仿），但它是像，不是同一个。\n\n` +
+          `> 手机上的 Tavo 等酒馆类前端**角色卡**兼容酒馆的卡片规格；\n` +
+          `> 对话能不能直接吃这个格式，请自己试一下，我们没有实测过。\n`,
+        date: new Date(pack.exportedAt),
+      });
+
+      report(`【${pack.name}】打包 ${files.length} 个文件…`);
+      const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+      downloadBlob(base + '_酒馆.zip', zip);
       return;
     }
 
@@ -1545,7 +1619,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.20</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.21</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1581,6 +1655,7 @@ ${ncxpts.join('\n')}
           <option value="split">每段对话一个文件（打包成 ZIP）</option>
           <option value="one">全部合并成一份 Markdown</option>
           <option value="epub">每个角色一本电子书（EPUB）</option>
+          <option value="tavern">酒馆对话（.jsonl，一段存档一个文件）</option>
         </select>
       </label>
       <div id="mufyx-tidytip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
@@ -1622,6 +1697,13 @@ ${ncxpts.join('\n')}
       $('mufyx-masktip').style.display = isMask ? 'block' : 'none';
       $('mufyx-cardtip').style.display = isCard ? 'block' : 'none';
       $('mufyx-tidytip').style.display = other ? 'block' : 'none';
+
+      const tavernOpt = shapeSel.querySelector('option[value=tavern]');
+      tavernOpt.disabled = other;
+      tavernOpt.textContent = other
+        ? `酒馆对话（.jsonl · ${isMask ? '面具' : '角色卡'}不适用）`
+        : '酒馆对话（.jsonl，一段存档一个文件）';
+      if (other && shapeSel.value === 'tavern') shapeSel.value = 'split';
 
       epubOpt.disabled = other;
       epubOpt.textContent = other
@@ -1737,7 +1819,8 @@ ${ncxpts.join('\n')}
         // name 带上，失败清单里才报得出人名，不然只剩一串 UUID
         ids = usable.filter((c) => c.characterId).map((c) => ({ id: c.characterId, live: c.lastSessionId, name: c.name }));
         if (!ids.length) throw new Error('没有可导出的角色。');
-        const unit = shape === 'epub' ? '一本电子书' : shape === 'one' ? '一份 Markdown' : '一个压缩包';
+        const unit = shape === 'epub' ? '一本电子书' : shape === 'one' ? '一份 Markdown'
+          : shape === 'tavern' ? '一包酒馆对话' : '一个压缩包';
         if (!confirm(`要导出 ${ids.length} 个角色，每个角色${unit}，会跑很久。继续吗？`)) {
           throw new Error('已取消。');
         }
@@ -1828,6 +1911,7 @@ ${ncxpts.join('\n')}
     getMyCards, cardToMarkdown, emitCards, cardRoles, cardAdversity, fetchCardImages,
     ensureToken, refreshToken, api, makeZip,
     downloadBlob, renderRecent, recentFiles, setLogSink: (f) => { logSink = f; },
+    contentToText, tidy, sessionToTavern,
     // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
     // 挂出来就能拿真实存档在浏览器/Node 里直接验，不用真的连账号。
     buildEpub, drawCover, stripTags, dropMachinery, chapterTitleEpub, uuid5,
