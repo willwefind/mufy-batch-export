@@ -161,11 +161,20 @@ Tampermonkey 会自动弹出一个安装页面，点 **安装** 就好。
 >
 > **懒得折腾 / 上面弄完还是没有？用这条，它绕开插件，一定能用：**
 >
-> 1. 在 mufy 的页面上按 **F12**，切到 **Console（控制台）**
-> 2. 第一次用可能要先手打 `allow pasting` 回车（Chrome 的防骗保护）
-> 3. 打开[脚本地址](https://raw.githubusercontent.com/willwefind/mufy-batch-export/main/mufy-batch-export.user.js)，
->    **全选复制**，粘进控制台回车
-> 4. 按钮立刻出现，用法完全一样
+> 0. **先确认你在 mufy 里是登录状态**（能看到自己的角色列表）。没登录的话粘进去也只会
+>    提示「续不上登录态」。
+> 1. 在 mufy 的页面上按 **F12**
+> 2. 上面会出现一排标签：**欢迎 / 元素 / 控制台 / 源代码**——点「**控制台**」
+>    （英文版叫 **Console**，就是同一个）
+> 3. 看最下面那一行，开头有个 **`>`**，**点一下它旁边的空白**，光标会在那儿闪
+> 4. 第一次用 Chrome 可能不让粘贴，要你先手打一句 `allow pasting` 回车（只需一次）
+> 5. 打开[脚本地址](https://raw.githubusercontent.com/willwefind/mufy-batch-export/main/mufy-batch-export.user.js)
+>    → `Ctrl+A` 全选 → `Ctrl+C` 复制
+> 6. 回到刚才 `>` 那一行 → `Ctrl+V` 粘贴 → **回车**
+> 7. 左下角出现「⬇ 批量导出」按钮，用法完全一样
+>
+> 💡 控制台里本来就飘着一堆黄的红的（网页自己的报错），**不用管**；
+> 但如果满屏都是 **401**，说明你的登录过期了，先重新登录再来第 5 步。
 >
 > 代价只是**关掉标签页就没了**，下次再粘一遍。急着导的时候走这条最快。
 
@@ -524,9 +533,12 @@ mufy 的「存档」是你按了「保存并开启新对话」才产生的。只
 脚本在面板里显示「已启用」就没被禁用；`@match` 覆盖 mufy 的所有页面，
 在 `/explore`、`/chat` 上都一样，实测过）。
 
-**急着用就走控制台那条**：在 mufy 页面按 F12 → Console →（必要时先打 `allow pasting`）→
+**急着用就走控制台那条**：在 mufy 页面按 F12 →
+点「**控制台**」那个标签（英文版叫 Console）→ 点最下面 `>` 那一行 →
+（必要时先手打 `allow pasting` 回车）→
 把[脚本](https://raw.githubusercontent.com/willwefind/mufy-batch-export/main/mufy-batch-export.user.js)
 整段粘进去回车，按钮立刻出现，功能一模一样，只是关掉标签页就没了。
+详细分步见上面「3. 开始导出」那个 🚨 框。
 
 **Q：以前一直好好的，最近突然没有按钮了？**
 
