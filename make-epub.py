@@ -197,7 +197,11 @@ def build_epub(pack, dest):
         chapters.append(('ch000.xhtml', '开场白',
                          chapter_xhtml('开场白', '角色卡自带，不属于任何一段对话', para_html(g))))
 
-    for i, s in enumerate(pack.get('sessions') or [], 1):
+    # 书按时间正序（旧 → 新）。ZIP 里存的是「新在前」，所以这里要倒过来。
+    # ⚠️ 必须和油猴脚本那条路保持一致 —— 两边出的书本来是等价的，
+    #    只改一边就等于把这个保证悄悄作废了。
+    sessions = list(reversed(pack.get('sessions') or []))
+    for i, s in enumerate(sessions, 1):
         title = chapter_title(s, i)
         arch = s.get('archives') or []
         when = (arch[0].get('createdAt', '')[:10] if arch else '未存档的最后一段')
