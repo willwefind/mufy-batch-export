@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.24.0
+// @version      1.25.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -1455,6 +1455,37 @@ ${ncxpts.join('\n')}
     return [head, ...rows].join('\n') + '\n';
   }
 
+  // 🔴 `JSON.stringify(pack, null, 2)` 在超大角色上会抛 `Invalid string length` ——
+  //    那不是内存耗尽，是**单个字符串超过了 JS 引擎的上限**（V8 约 5 亿字符），
+  //    而缩进本身就能让体积接近翻倍。有用户导某个角色时整轮失败、面板里连下载链接都没有，
+  //    报的就是这个。
+  // 退让三级：带缩进 → 不带缩进 → 一段一个 JSON。全都失败才放弃，并且照实说。
+  function packJsonFiles(pack, report, date) {
+    try {
+      return [{ name: '_原始数据.json', text: JSON.stringify(pack, null, 2), date }];
+    } catch (e) {
+      report('  ⚠️ 完整备份太大，去掉缩进再试…');
+    }
+    try {
+      return [{ name: '_原始数据.json', text: JSON.stringify(pack), date }];
+    } catch (e) {
+      report('  ⚠️ 还是太大，改成一段一个 JSON 文件。');
+    }
+    const head = { ...pack, sessions: undefined };
+    const out = [];
+    try {
+      out.push({ name: '_原始数据/00_角色.json', text: JSON.stringify(head, null, 2), date });
+    } catch (e) { /* 连角色头都写不下就算了，下面每段照样各自尝试 */ }
+    let failed = 0;
+    pack.sessions.forEach((sess, i) => {
+      const nm = `_原始数据/${String(i + 1).padStart(2, '0')}_${sess.sessionId.slice(0, 8)}.json`;
+      try { out.push({ name: nm, text: JSON.stringify(sess), date }); }
+      catch (e) { failed += 1; }
+    });
+    if (failed) report(`  🔴 有 ${failed} 段连单独的 JSON 都写不下，这几段只有 Markdown 版本。`);
+    return out;
+  }
+
   async function emit(pack, opts, ts, report) {
     // 重名角色真的存在（同一个名字下挂着两个不同的 characterId，实测遇到过好几对）。
     // 不加区分的话两个包会撞名，靠浏览器补 " (1)"，事后根本分不出谁是谁。
@@ -1579,7 +1610,7 @@ ${ncxpts.join('\n')}
       });
 
       if (opts.json) {
-        files.push({ name: '_原始数据.json', text: JSON.stringify(pack, null, 2), date: new Date(pack.exportedAt) });
+        files.push(...packJsonFiles(pack, report, new Date(pack.exportedAt)));
       }
 
       report(`【${pack.name}】打包 ${files.length} 个文件…`);
@@ -1686,7 +1717,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.24</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.25</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1993,6 +2024,15 @@ ${ncxpts.join('\n')}
           if (/续不上登录态/.test(e.message)) throw e; // 掉登录，整批停下来才对
           failed.push({ id: t.id, name: t.name || t.id, msg: e.message });
           report(`❌ [${seq}/${totalIds}] 【${t.name || t.id}】失败：${e.message}`);
+          // 「Invalid string length」不是网络问题，是这个角色大到超过了 JS 单个字符串的上限。
+          // 甩一句英文报错没用，直接告诉她怎么办。
+          if (/Invalid string length|string length|RangeError/i.test(e.message)) {
+            report('   ↳ 这个角色太大了（超过 JS 单个字符串的上限），不是网络问题。');
+            report('     把面板上「每包最多多少段对话」填 20 再导一次，通常就过了；');
+            report('     还不行就填 10，或者先取消勾选「附带 JSON 完整备份」。');
+          } else if (/out of memory|Array buffer allocation|allocation failed/i.test(e.message)) {
+            report('   ↳ 内存不够。同样：把「每包最多多少段对话」填 20 再试。');
+          }
           report('   已跳过，继续下一个。');
         }
         await sleep(400);
