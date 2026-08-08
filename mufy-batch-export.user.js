@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.25.0
+// @version      1.26.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -515,7 +515,12 @@
       dialogs: out,
       expected,
       incomplete: !!(stopped || short),
-      reason: stopped || (short ? `接口说共 ${expected} 条，只取到 ${out.length} 条（换小页重试过，还是这么多）` : ''),
+      reason: stopped
+        || (short
+          ? `接口说共 ${expected} 条，只取到 ${out.length} 条（换小页重试过，还是这么多）` +
+            `——也可能那边本来就只剩这些：mufy 迁移过服务器并公告说会丢一部分记录，` +
+            `而它返回的总数似乎没跟着更新。想确认就在 mufy 里把这段往上翻到底数一数。`
+          : ''),
     };
   }
 
@@ -1717,7 +1722,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.25</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.26</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
