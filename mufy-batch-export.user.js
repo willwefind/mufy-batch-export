@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.22.0
+// @version      1.23.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -318,7 +318,8 @@
     if (bulk > 8e6) {
       say(`  ⚠️ 这一包很大（约 ${(bulk / 1e6).toFixed(1)}M 字）。手机浏览器可能扛不住。`);
       say('     症状是「显示导出完毕、页面自己刷新了一下、然后没有文件」＝标签页被系统回收了。');
-      say('     建议：改用电脑导；或者取消勾选「附带 JSON 完整备份」（那份通常占一半以上）再试。');
+      say('     建议：把面板上的「每包最多多少段对话」填成 20 再导一次（这是最有效的一招）；');
+      say('     或者取消勾选「附带 JSON 完整备份」（那份通常占一半以上）；再不行就用电脑导。');
     }
 
     const enc = new TextEncoder();
@@ -871,7 +872,10 @@
   // ⚠️ 只走存档列表会漏掉它：你聊过但从没按"保存"的对话，存档接口根本不列。
   //    实测在一个 200+ 角色的账号上，有 102 个角色属于这种情况，
 //    合计 1356 条消息（最多的一个 112 条）曾被整段漏掉。
-  async function collectCharacter(characterId, opts, report, limit, liveSessionId) {
+  // offset/limit 是「分批导」用的：**只抓这一批的对话**，打包完就放掉再抓下一批。
+  // 光切 ZIP 不够——不切这里的话，一个角色的全部对话还是会先整个进内存
+  // （有用户一万轮 / 178 段，光这一步就 out of memory）。
+  async function collectCharacter(characterId, opts, report, limit, liveSessionId, offset) {
     const { name, greeting, lastSessionId } = await getCharacter(characterId);
     // 🔴 列表那条路会把 lastSessionId 传进来；「手动填 ID」和「当前角色」不会。
     //    不补上的话，一个只有「聊过没保存」内容的角色，用手动 ID 去导会导出 0 段——
@@ -901,8 +905,22 @@
     }
 
     let list = [...bySession.values()];
-    if (limit) list = list.slice(0, limit);
-    report(`【${name}】共 ${archives.length} 条存档 → ${list.length} 个对话待抓取`);
+    // 🔴 分批必须切在排序之后，否则「第 1–50 段」是按接口返回的顺序切的，
+    //    对人没有意义、批次之间也不稳定。这里用存档时间预排一次（新的在前），
+    //    正在聊的那段没有存档时间，当作最新。抓完之后的最终排序用的是同一把尺子，
+    //    所以批内顺序与整体一致。
+    const preTime = (it) =>
+      it.archives && it.archives.length ? new Date(it.archives[0].createdAt).getTime() || 0 : Infinity;
+    list.sort((a, b) => preTime(b) - preTime(a));
+    const totalSessions = list.length;
+    const from = offset || 0;
+    if (limit) list = list.slice(from, from + limit);
+    else if (from) list = list.slice(from);
+    report(
+      limit || from
+        ? `【${name}】共 ${archives.length} 条存档 / ${totalSessions} 段 → 本批抓第 ${from + 1}–${from + list.length} 段`
+        : `【${name}】共 ${archives.length} 条存档 → ${list.length} 个对话待抓取`
+    );
 
     const sessions = [];
     let i = 0;
@@ -950,7 +968,11 @@
     // 新的排前面
     kept.sort((a, b) => sessionTime(b) - sessionTime(a));
 
-    return { characterId, name, greeting, archiveCount: archives.length, sessions: kept, exportedAt: new Date().toISOString() };
+    return {
+      characterId, name, greeting, archiveCount: archives.length, sessions: kept,
+      totalSessions, batchFrom: from, // 分批时给调用方判断还有没有下一批
+      exportedAt: new Date().toISOString(),
+    };
   }
 
   // 一段对话的代表时间：存档时间优先，否则用最后一条消息
@@ -1411,18 +1433,27 @@ ${ncxpts.join('\n')}
   async function emit(pack, opts, ts, report) {
     // 重名角色真的存在（同一个名字下挂着两个不同的 characterId，实测遇到过好几对）。
     // 不加区分的话两个包会撞名，靠浏览器补 " (1)"，事后根本分不出谁是谁。
+    // ⚠️ bt / tag 必须在最前面定义：下面判重和拼文件名都要用。
+    //    放到后面会 TDZ —— 真踩过：每个角色都抛 "Cannot access 'bt' before initialization"，
+    //    还被逐角色的 try/catch 接住，表面上只看到「这次没有产生任何文件」，很难联想到是这儿。
+    const bt = pack.batch; // {from, to, total} —— 不分批时为 undefined
+    const tag = bt ? `_第${bt.from}-${bt.to}段` : ''; // 分批时文件名带「第几到第几段」
+
     // 比对的是规整之后的名字（和上面数重名时用的是同一把尺子）
     const safe = safeName(pack.name);
     const dup = opts.dupNames && opts.dupNames.has(safe);
+    // ⚠️ 判重的键必须**带上批次标签**：同一个角色分成几批时，
+    //    每批的文件名本来就靠这个标签区分，不带它会把自己的第 2、3 批当成撞名，
+    //    白白补上 characterId 和下划线（真踩过，日志里出现过 `_b5241d__`）。
     let stem = `${safe}${dup ? '_' + pack.characterId.slice(0, 6) : ''}`;
     // 兜底：万一预扫没算到（比如列表里的名字和角色卡上的名字不一致），
     // 运行期再挡一道，绝不让两个角色写出同一个文件名。
     if (opts.usedStems) {
-      if (opts.usedStems.has(stem)) stem = `${safe}_${pack.characterId.slice(0, 6)}`;
-      while (opts.usedStems.has(stem)) stem += '_';
-      opts.usedStems.add(stem);
+      if (opts.usedStems.has(stem + tag)) stem = `${safe}_${pack.characterId.slice(0, 6)}`;
+      while (opts.usedStems.has(stem + tag)) stem += '_';
+      opts.usedStems.add(stem + tag);
     }
-    const base = `mufy_${stem}_${ts}`;
+    const base = `mufy_${stem}_${ts}${tag}`;
 
     if (opts.shape === 'epub') {
       // 书名就是文件名，不加 mufy_ 前缀也不加时间戳 —— 导进图书类 App 之后，
@@ -1430,7 +1461,7 @@ ${ncxpts.join('\n')}
       report(`【${pack.name}】做成电子书…`);
       const r = await buildEpub(pack, (n) => drawCover(pack.name, `${n} 章`));
       if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return; }
-      downloadBlob(`${stem}.epub`, r.blob);
+      downloadBlob(`${stem}${tag}.epub`, r.blob);
       report(`  ${r.chapters} 章 / ${r.total} 条　${(r.blob.size / 1048576).toFixed(2)} MB`);
       return;
     }
@@ -1481,17 +1512,21 @@ ${ncxpts.join('\n')}
       // 章节：一段对话一篇。索引严格按 chapters 生成，别把开场白混进来数——
       // 混进来就会整体错位一位，最后一项还会撞上 undefined。
       const chapters = pack.sessions.map((s, i) => {
-        const idx = String(i + 1).padStart(2, '0');
+        // 分批时接着上一批往下编号（用已导出的段数，不用槽位），
+        // 这样几批合到一个文件夹里序号是连续的，也和不分批时完全一致
+        const seq = (bt ? bt.seqBase : 0) + i + 1;
+        const idx = String(seq).padStart(2, '0');
         const slug = fileSlug(s);
         let nm = `${idx}_${stamp(sessionTime(s))}${slug ? '_' + slug : ''}.md`;
         while (used.has(nm)) nm = nm.replace(/\.md$/, '_.md');
         used.add(nm);
-        return { name: nm, text: toMarkdownOne(pack, s, i + 1, opts), date: sessionTime(s) };
+        return { name: nm, text: toMarkdownOne(pack, s, seq, opts), date: sessionTime(s) };
       });
 
       // 开场白单独成篇，排在最前面——它是角色卡自带的第一幕，不属于任何一段对话
       const files = [];
-      const g = pack.greeting ? (opts.tidy ? tidy(pack.greeting) : pack.greeting) : '';
+      // 开场白只放进第一批，后面几批不重复塞（它是角色卡自带的，不属于任何一段）
+      const g = pack.greeting && (!bt || bt.from === 1) ? (opts.tidy ? tidy(pack.greeting) : pack.greeting) : '';
       if (g.trim()) {
         files.push({
           name: '00_开场白.md',
@@ -1506,10 +1541,14 @@ ${ncxpts.join('\n')}
       files.push({
         name: '00_目录.md',
         text:
-          `# ${pack.name} · 共 ${pack.sessions.length} 段对话\n\n` +
+          (bt
+            ? `# ${pack.name} · 第 ${bt.from}–${bt.to} 段（全部共 ${bt.total} 段）\n\n` +
+              `> 这个角色是分批导出的，这只是其中一包，其余的段在别的包里。\n` +
+              (bt.from === 1 ? '' : `> 开场白在第一包里。\n`) + '\n'
+            : `# ${pack.name} · 共 ${pack.sessions.length} 段对话\n\n`) +
           `导出时间：${new Date(pack.exportedAt).toLocaleString('zh-CN')}\n\n` +
           (g.trim() ? `0. [00_开场白.md](00_%E5%BC%80%E5%9C%BA%E7%99%BD.md)　角色卡自带\n` : '') +
-          chapters.map((f, i) => `${i + 1}. [${f.name}](${linkTarget(f.name)})　${pack.sessions[i].messageCount} 条`).join('\n') +
+          chapters.map((f, i) => `${(bt ? bt.seqBase : 0) + i + 1}. [${f.name}](${linkTarget(f.name)})　${pack.sessions[i].messageCount} 条`).join('\n') +
           '\n',
         date: new Date(pack.exportedAt),
       });
@@ -1622,7 +1661,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.22</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.23</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -1645,6 +1684,14 @@ ${ncxpts.join('\n')}
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
+      <label id="mufyx-chunkwrap">每包最多多少段对话（留空＝不分包）
+        <input type="number" id="mufyx-chunk" min="1" step="1" placeholder="留空＝一个角色一个包">
+      </label>
+      <div id="mufyx-chunktip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        对话特别多的角色（上百段）在手机上、甚至电脑上都可能因为内存不够而失败。
+        填个 <b>20</b> 试试：脚本会**一批一批地抓、抓完就放掉**，内存峰值只跟一批有关。<br>
+        代价是同一个角色会出好几个包（文件名带「第几到第几段」）。
+      </div>
       <label id="mufyx-startwrap" style="display:none">从第几个角色开始（中断后接着跑用）
         <input type="number" id="mufyx-start" min="1" step="1" value="1">
       </label>
@@ -1697,6 +1744,9 @@ ${ncxpts.join('\n')}
       const batch = scope === 'chatted' || scope === 'followed';
       $('mufyx-startwrap').style.display = batch ? 'block' : 'none';
       $('mufyx-starttip').style.display = batch ? 'block' : 'none';
+      // 分批只对聊天记录有意义（面具/角色卡不是按段组织的）
+      $('mufyx-chunkwrap').style.display = other ? 'none' : 'block';
+      $('mufyx-chunktip').style.display = other ? 'none' : 'block';
       $('mufyx-masktip').style.display = isMask ? 'block' : 'none';
       $('mufyx-cardtip').style.display = isCard ? 'block' : 'none';
       $('mufyx-tidytip').style.display = other ? 'block' : 'none';
@@ -1761,6 +1811,7 @@ ${ncxpts.join('\n')}
       json: $('mufyx-json').checked,
       shape,
       split: shape === 'split',
+      chunk: Math.max(0, parseInt($('mufyx-chunk').value, 10) || 0),
     };
     const scope = $('mufyx-scope').value;
 
@@ -1874,6 +1925,34 @@ ${ncxpts.join('\n')}
       for (const t of ids) {
         seq += 1;
         try {
+          if (opts.chunk) {
+            // 分批：每批只抓这一批的对话，打包完就放掉再抓下一批。
+            // 关键是「抓」也要分批 —— 只切 ZIP 的话，全部对话还是会先整个进内存。
+            let from = 0, total = null, done = 0, msgs = 0, name = t.name || t.id;
+            for (;;) {
+              const pack = await collectCharacter(t.id, opts, report, opts.chunk, t.live, from);
+              name = pack.name;
+              if (total === null) total = pack.totalSessions;
+              if (pack.sessions.length) {
+                // 用槽位范围而不是 pack.sessions.length：空段会被过滤掉，
+                // 拿留下来的条数当上界会让下一批的编号对不上（出现过 1-19 接 21-40）。
+                // from/to 是「槽位范围」，只用来给文件名贴标签；
+                // seqBase 是「已经导出了多少段」，用来给段号连续编号 ——
+                // 空段会被过滤掉，用槽位当段号会错位，跟不分批时也对不上。
+                pack.batch = { from: from + 1, to: Math.min(from + opts.chunk, total), total, seqBase: done };
+                await emit(pack, opts, ts, report);
+                done += pack.sessions.length;
+                msgs += pack.sessions.reduce((n, s) => n + s.messageCount, 0);
+              }
+              from += opts.chunk;
+              if (from >= total) break;
+            }
+            if (!done) { report(`【${name}】没有可导出的对话，跳过。`); emptyCount += 1; }
+            else {
+              report(`✅ [${seq}/${totalIds}] 【${name}】已导出 ${done} 段对话 / ${msgs} 条消息（分 ${Math.ceil(total / opts.chunk)} 批）`);
+              okCount += 1;
+            }
+          } else {
           const pack = await collectCharacter(t.id, opts, report, null, t.live);
           if (!pack.sessions.length) {
             report(`【${pack.name}】没有可导出的对话，跳过。`);
@@ -1883,6 +1962,7 @@ ${ncxpts.join('\n')}
             const msgs = pack.sessions.reduce((n, s) => n + s.messageCount, 0);
             report(`✅ [${seq}/${totalIds}] 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
             okCount += 1;
+          }
           }
         } catch (e) {
           if (/续不上登录态/.test(e.message)) throw e; // 掉登录，整批停下来才对
