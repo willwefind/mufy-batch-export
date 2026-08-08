@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.26.0
+// @version      1.27.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -1605,6 +1605,9 @@ ${ncxpts.join('\n')}
           (bt
             ? `# ${pack.name} · 第 ${bt.from}–${bt.to} 段（全部共 ${bt.total} 段）\n\n` +
               `> 这个角色是分批导出的，这只是其中一包，其余的段在别的包里。\n` +
+              `> **段是按时间从新到旧排的**，所以第 1 段是最近那次，最早的记录在最后一包。\n` +
+              `> 一段＝一次对话，可能对应好几条存档；聊过但没保存的那段也算一段。\n` +
+              `> 每一段的内容都是完整的 —— 分批只切「这一包放几段」，不切段本身。\n` +
               (bt.from === 1 ? '' : `> 开场白在第一包里。\n`) + '\n'
             : `# ${pack.name} · 共 ${pack.sessions.length} 段对话\n\n`) +
           `导出时间：${new Date(pack.exportedAt).toLocaleString('zh-CN')}\n\n` +
@@ -1722,7 +1725,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.26</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.27</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
