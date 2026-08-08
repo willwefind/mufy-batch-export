@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.30.0
+// @version      1.31.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -933,7 +933,10 @@
   // offset/limit 是「分批导」用的：**只抓这一批的对话**，打包完就放掉再抓下一批。
   // 光切 ZIP 不够——不切这里的话，一个角色的全部对话还是会先整个进内存
   // （有用户一万轮 / 178 段，光这一步就 out of memory）。
-  async function collectCharacter(characterId, opts, report, limit, liveSessionId, offset) {
+  // lastInteracted 只在角色列表那条记录上有（`characters/get` 的 45 个字段里没有），
+  // 所以要从调用方一路带下来。它是「聊过但一条都取不到」这种情况下唯一的旁证：
+  // 有互动时间 ＝ 你确实跟这个角色互动过，不是从没点开过。
+  async function collectCharacter(characterId, opts, report, limit, liveSessionId, offset, lastInteracted) {
     const { name, greeting, lastSessionId } = await getCharacter(characterId);
     // 🔴 列表那条路会把 lastSessionId 传进来；「手动填 ID」和「当前角色」不会。
     //    不补上的话，一个只有「聊过没保存」内容的角色，用手动 ID 去导会导出 0 段——
@@ -1117,11 +1120,33 @@
     // 新的排前面
     kept.sort((a, b) => sessionTime(b) - sessionTime(a));
 
+    // 🔴 「一段都没留下」有两种，性质完全不同，不许混为一谈：
+    //    ① 从没点开过这个角色 —— 那连 session 都不会有，走不到这儿；
+    //    ② **你确实互动过，但接口现在一条正文都给不出来**（total 直接是 0、也没有存档）。
+    //    ②看起来跟①一模一样，而它其实是「那段记录在 mufy 那边没了」的信号 ——
+    //    实测过一个账号上的两个角色：最后互动时间明明白白是四月，接口 total=0、存档 0 条。
+    //    ——而这个账号的主人一口咬定「我跟它们聊过」。她是对的：
+    //    「一条都取不到」和「从没聊过」在数据上长得一样，但对人来说是两件事。
+    //    所以这里把事实记下来，让产物照实说，不替 mufy 打圆场也不冤枉用户的记性。
+    const noContent = kept.length === 0 && sessions.length > 0;
+
     return {
       characterId, name, greeting, archiveCount: archives.length, sessions: kept,
       totalSessions, batchFrom: from, // 分批时给调用方判断还有没有下一批
+      noContent, lastInteracted: lastInteracted || null,
       exportedAt: new Date().toISOString(),
     };
+  }
+
+  // 一个「一段对话都没有」的角色，日志该怎么说。
+  // 🔴 别写成「没聊过」——记得自己聊过的人会立刻知道你在瞎说（真被当场纠正过）。
+  //    有互动时间就把它摆出来，让人自己判断是「我确实没聊」还是「记录没了」。
+  function emptyWhy(pack) {
+    const d = pack && pack.lastInteracted ? String(pack.lastInteracted).slice(0, 10) : '';
+    if (pack && pack.noContent) {
+      return `接口一条对话都取不到${d ? `（最后互动 ${d}）` : ''}，先把开场白留下了`;
+    }
+    return '只有开场白，没有对话记录 —— 也给你留了一份';
   }
 
   // 一段对话的代表时间：存档时间优先，否则用最后一条消息
@@ -1775,6 +1800,20 @@ ${ncxpts.join('\n')}
             return `${(bt ? bt.seqBase : 0) + i + 1}. [${f.name}](${linkTarget(f.name)})　${s.messageCount} 条${mark}`;
           }).join('\n') +
           '\n' +
+          // 一条对话都没取到时，包里必须写清楚是怎么回事 —— 否则拿到一个只有开场白的包，
+          // 用户只会以为自己没聊过（而他可能记得很清楚：他聊过）。
+          (pack.noContent
+            ? '\n---\n\n' +
+              '## ⚠️ 这个角色的对话，一条都没取到\n\n' +
+              (pack.lastInteracted
+                ? `mufy 记着你和它的**最后一次互动是 ${String(pack.lastInteracted).slice(0, 10)}**，`
+                : 'mufy 里有这个角色的会话记录，') +
+              '但现在接口一条正文都给不出来（也没有任何存档）。所以这个包里只有开场白。\n\n' +
+              '**这多半意味着那段记录在 mufy 那边已经没有了**（他们迁移服务器时公告过会丢一部分）。' +
+              '想确认的话，去 mufy 打开这个角色看一眼：\n\n' +
+              '- **里面也是空的** → 那边确实没有了，脚本变不出来\n' +
+              '- **里面还看得到聊天内容** → 那就是我们的问题，请把角色名告诉我们\n'
+            : '') +
           (pack.sessions.some((s) => s.fromArchiveOnly)
             ? '\n---\n\n' +
               '## 🔴 有几段只拿到了存档摘要\n\n' +
@@ -1896,7 +1935,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.30</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.31</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
@@ -2122,7 +2161,10 @@ ${ncxpts.join('\n')}
         if (opts.dupNames.size) report(`有 ${opts.dupNames.size} 个重名角色，文件名会补角色 ID 区分。`);
 
         // name 带上，失败清单里才报得出人名，不然只剩一串 UUID
-        ids = usable.filter((c) => c.characterId).map((c) => ({ id: c.characterId, live: c.lastSessionId, name: c.name }));
+        // interacted 带上：万一这个角色一条对话都取不到，产物里要能说出
+        // 「你最后一次跟它互动是哪天」——那是区分「没聊过」和「记录没了」的唯一凭据
+        ids = usable.filter((c) => c.characterId)
+          .map((c) => ({ id: c.characterId, live: c.lastSessionId, name: c.name, interacted: c.lastInteracted }));
         if (!ids.length) throw new Error('没有可导出的角色。');
         const unit = shape === 'epub' ? '一本电子书' : shape === 'one' ? '一份 Markdown'
           : shape === 'tavern' ? '一包酒馆对话' : '一个压缩包';
@@ -2166,7 +2208,7 @@ ${ncxpts.join('\n')}
             let from = 0, total = null, done = 0, msgs = 0, name = t.name || t.id;
             let lastPack = null;   // 一段都没导成时，可能还剩个开场白要留（见下面）
             for (;;) {
-              const pack = await collectCharacter(t.id, opts, report, opts.chunk, t.live, from);
+              const pack = await collectCharacter(t.id, opts, report, opts.chunk, t.live, from, t.interacted);
               name = pack.name;
               lastPack = pack;
               if (total === null) total = pack.totalSessions;
@@ -2188,7 +2230,7 @@ ${ncxpts.join('\n')}
               // 分批这条路同理：没有一段对话，但开场白还在的话，照样给她留一份。
               // 这里的 pack 没有 batch 标签，出来就是个普通的包，不带「第几到第几段」。
               if (lastPack && (lastPack.greeting || '').trim() && await emit(lastPack, opts, ts, report)) {
-                report(`✅ [${seq}/${totalIds}] 【${name}】没有对话，只有开场白 —— 也给你留了一份`);
+                report(`✅ [${seq}/${totalIds}] 【${name}】${emptyWhy(lastPack)}`);
                 okCount += 1;
               } else {
                 report(`【${name}】没有可导出的对话，跳过。`);
@@ -2200,7 +2242,7 @@ ${ncxpts.join('\n')}
               okCount += 1;
             }
           } else {
-          const pack = await collectCharacter(t.id, opts, report, null, t.live);
+          const pack = await collectCharacter(t.id, opts, report, null, t.live, 0, t.interacted);
           // 🔴 一段对话都没有，不代表没东西可留：**角色卡自带的开场白也是记录**
           //    （实测有角色的开场白 2900 字，是完整的一幕场景）。
           //    以前这里只看 sessions.length 就跳过，把这类角色整个丢掉了 ——
@@ -2219,7 +2261,7 @@ ${ncxpts.join('\n')}
             if (!made) {
               emptyCount += 1;                       // emit 自己已经说明了原因
             } else if (!pack.sessions.length) {
-              report(`✅ [${seq}/${totalIds}] 【${pack.name}】没有对话，只有开场白 —— 也给你留了一份`);
+              report(`✅ [${seq}/${totalIds}] 【${pack.name}】${emptyWhy(pack)}`);
               okCount += 1;
             } else {
               report(`✅ [${seq}/${totalIds}] 【${pack.name}】已导出 ${pack.sessions.length} 段对话 / ${msgs} 条消息`);
