@@ -31,6 +31,13 @@
 
   if (window.__mufyExporter) { window.__mufyExporter.open(); return; }
 
+  // 面板标题上显示的版本号。
+  // 🔴 2026-08-10 栽过一次：只改了上面的 @version，**面板里那个数字是手写的、没跟着改** ——
+  //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
+  //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
+  //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
+  const VERSION = '1.33.0';
+
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1978,7 +1985,7 @@ ${ncxpts.join('\n')}
     panel.id = 'mufyx-panel';
     panel.innerHTML = `
       <button id="mufyx-close" title="关闭">✕</button>
-      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v1.32</span></h3>
+      <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v${VERSION.replace(/\.0$/, '')}</span></h3>
       <label>范围
         <select id="mufyx-scope">
           <option value="current">当前角色（本页）</option>
