@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.33.0
+// @version      1.34.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.33.0';
+  const VERSION = '1.34.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -522,15 +522,20 @@
     //    → 数字可疑时（正好拿满、且是 500 的整数倍）就多问几页；有就接着翻。
     //    普通对话（几十条）永远进不来这个分支，一次多余的请求都不会发。
     let beyond = 0;
-    if (r.expected !== null && r.expected > 0 && r.out.length === r.expected && r.expected % 500 === 0) {
+    // 「数字可疑」＝正好拿满、而且是 500 的整数倍。普通对话（几十条）永远不成立。
+    const suspicious = () =>
+      r.expected !== null && r.expected > 0 && r.out.length === r.expected && r.expected % 500 === 0;
+
+    // 从 startPage 开始按 size 一页页往下要，只要还有没见过的就继续。返回多捞到几条。
+    const sweep = async (size, startPage) => {
       const seen = new Set(r.out.map((m) => m.dialogsId));
-      let page = r.expected / 500 + 1;
+      let page = startPage, added = 0;
       for (;;) {
         let d;
         try {
           d = await api(
             `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}&characterId=${encodeURIComponent(characterId)}` +
-              `&pageNum=${page}&pageSize=500`
+              `&pageNum=${page}&pageSize=${size}`
           );
         } catch (e) {
           break;                       // 探测失败不算错：这本来就是额外多问的一句
@@ -538,13 +543,29 @@
         const rows = (d && d.data) || [];
         const fresh = rows.filter((m) => !seen.has(m.dialogsId));
         for (const m of fresh) { seen.add(m.dialogsId); r.out.push(m); }
-        beyond += fresh.length;
+        added += fresh.length;
+        // 一条新的都没有（含服务端绕回第一页）→ 立刻停，别死循环
         if (!fresh.length || (d && d.hasNext === false)) break;
         page += 1;
         if (page > 500) break;
         await sleep(120);
       }
-      // 真捞到了 → total 是假的，以实际拿到的为准，否则下面会误报「多拿了」
+      return added;
+    };
+
+    if (suspicious()) beyond += await sweep(500, r.expected / 500 + 1);
+    // 真捞到了 → total 是假的，以实际拿到的为准，否则下面会误报「少拿了」
+    if (beyond) r.expected = r.out.length;
+
+    // 🎯 v1.34：最后一发——一次就要 2000 条。
+    //    500 和 100 两种页大小都恰好停在 1000（2×500 和 10×100 都是 1000），
+    //    上面那轮从第 3 页往后要也一条不给 —— 这些都指向「卡的是偏移量」。
+    //    但实测这个接口 pageSize 到 2000 都接受，而「一次请求就要 2000 条」
+    //    这个组合从来没试过：如果那边限制的是**翻页深度**而不是偏移量，
+    //    一页要满就可能一次拿全。拿不到也只是白问一次。
+    //    只在数字可疑、且上面那轮一无所获时才打这一发。
+    if (beyond === 0 && suspicious()) {
+      beyond += await sweep(2000, 1);
       if (beyond) r.expected = r.out.length;
     }
 
