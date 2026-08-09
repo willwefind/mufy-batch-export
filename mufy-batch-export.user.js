@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.34.0
+// @version      1.35.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.34.0';
+  const VERSION = '1.35.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -472,8 +472,25 @@
   //    现在：抓到多少留多少，并且明确记下「接口说有多少 / 实际拿到多少」。
   async function getDialogs(sessionId, characterId) {
     // 按给定页大小把一段对话整个翻完。返回「抓到多少 / 接口说多少 / 为什么停」。
+    // 🔴🔴🔴 v1.35 换掉了停止判据，这是这个函数最要紧的一行，别改回去。
+    //
+    //  以前是「拿到的条数 >= 接口说的 total 就停」。这条判据错在**它信 total**，
+    //  而 total 会撒谎，于是同一个病换着长相咬了我们三次：
+    //    · 接口说 1000、实际远不止 → 停在 1000，**一声不吭**（v1.33 才发现）
+    //    · 只在「正好是 500 的整数倍」时才补探 → 1026 条那段直接漏掉（v1.34 之后才发现）
+    //    · 每修一次就再漏一种数字 —— 因为补丁打在症状上，不在判据上
+    //
+    //  现在的判据不看 total，只看**这一页装满了没有**：
+    //    满页（rows.length === size）→ 后面还可能有，继续要下一页
+    //    不满 / 空 / 一条新 ID 都没有 / hasNext===false → 到头了，停
+    //  这个接口只有 pageNum + pageSize 两个旋钮，「一直要到给不满为止」在逻辑上
+    //  **就是穷尽**，没有第三种要法。total 从此只用来报数，不用来决定停不停。
+    //
+    //  代价几乎为零：25 条的普通段第一页就没装满 → 立刻停，**比以前还少发请求**；
+    //  只有满页的长段才会多问一页，而那一问正是关键的一问。
     const fetchAll = async (size) => {
       const out = [];
+      const seen = new Set();
       let page = 1, expected = null, stopped = '';
       for (;;) {
         let d;
@@ -487,9 +504,14 @@
           break;                       // ← 别抛，保住已经抓到的
         }
         const rows = (d && d.data) || [];
-        out.push(...rows);
+        // 按 dialogsId 判新：服务端要是绕回第一页，这里立刻就看得出来（也就不会死循环）
+        let fresh = 0;
+        for (const m of rows) {
+          if (seen.has(m.dialogsId)) continue;
+          seen.add(m.dialogsId); out.push(m); fresh += 1;
+        }
         if (expected === null && d && typeof d.total === 'number') expected = d.total;
-        if (!rows.length || (expected !== null && out.length >= expected) || (d && d.hasNext === false)) break;
+        if (!fresh || rows.length < size || (d && d.hasNext === false)) break;
         page += 1;
         if (page > 500) { stopped = '页数超过上限 500'; break; }
         await sleep(120);
@@ -513,18 +535,11 @@
       if (r2.stopped && !r.stopped && r.out.length < r.expected) r.stopped = r2.stopped;
     }
 
-    // 🔴🔴 v1.33：「拿满了」不等于「拿全了」。
-    //    一位用户拿 mufy 官方导出对过账：同一段对话官方那边有 2971 条，
-    //    而 dialogs 接口的 total 和我们实际拿到的**都是 1000** —— 也就是说
-    //    **total 本身就是被截过的**。两个数一样，脚本就以为自己拿全了，
-    //    连一句警告都不会给（这比少拿更危险：它是静默的）。
-    //    而上面那个循环恰好停在 out.length >= expected —— 第 3 页从来没被问过。
-    //    → 数字可疑时（正好拿满、且是 500 的整数倍）就多问几页；有就接着翻。
-    //    普通对话（几十条）永远进不来这个分支，一次多余的请求都不会发。
-    let beyond = 0;
-    // 「数字可疑」＝正好拿满、而且是 500 的整数倍。普通对话（几十条）永远不成立。
-    const suspicious = () =>
-      r.expected !== null && r.expected > 0 && r.out.length === r.expected && r.expected % 500 === 0;
+    // v1.35 之后，上面的 fetchAll 已经是「翻到给不满为止」，
+    // 所以 v1.33 那轮「拿满了再多问几页」已经被它吸收掉了，不再单独跑一遍。
+    // beyond ＝ 比接口自报的 total 多拿到多少条（>0 就说明 total 撒了谎，要说出来）。
+    let beyond = r.expected !== null && r.out.length > r.expected ? r.out.length - r.expected : 0;
+    if (beyond) r.expected = r.out.length;   // total 是假的，以实际拿到的为准
 
     // 从 startPage 开始按 size 一页页往下要，只要还有没见过的就继续。返回多捞到几条。
     const sweep = async (size, startPage) => {
@@ -553,31 +568,13 @@
       return added;
     };
 
-    if (suspicious()) beyond += await sweep(500, r.expected / 500 + 1);
-    // 真捞到了 → total 是假的，以实际拿到的为准，否则下面会误报「少拿了」
-    if (beyond) r.expected = r.out.length;
-
-    // 🎯 v1.34：最后一发——一次就要 2000 条。
-    //    ⚠️⚠️ **在唯一的真实样本上没捞到任何东西。别把它当成有效。**
-    //
-    //    2026-08-10，一位用户那段对话（官方引继码导出 2971 条，接口只给 1000）上，
-    //    **实际试过的是这三种，都停在 1000**：
-    //      · pageSize=500 × 2 页        → 1000（接口 total 也说 1000）
-    //      · 从第 3 页往后要（v1.33）    → 一条不给
-    //      · 一次请求要 2000 条（这一发）→ 一条不给
-    //    ⚠️ 换小页（100）那条**没在她这段上跑过** —— 它只在「拿到的比接口说的少」时
-    //       才触发，而她是拿满的。「100×10 页也是 1000」来自**另一位**用户
-    //       （接口说 1458 只给 1000 那位）。别把两个人的证据拼成一条，我拼过一次。
-    //
-    //    所以能说的是：**这一段更早的内容，我们试过的几种要法都拿不到**；
-    //    指向「卡的是偏移量」，但没到板上钉钉。
-    //    🔴 而且账还没算平：她后来重导拿到 **2026 条**（3 个 session 合成 2 段），
-    //       离官方的 2971 仍差约 945 条 —— **那 945 卡在哪儿，目前不知道。**
-    //       ⚠️ 已知盲区：「可疑」的判据是「正好拿满 **且** 是 500 的整数倍」，
-    //       所以被截在别的数上的段（比如 1026）根本不会被探测。
-    //    → 用户侧的出路写在 README 里：**mufy 官方的引继码导出**（另一条路）能拿到全史。
-    //    这一发留着不删：代价只有一次请求、只落在可疑段上，且只验过一个账号的一段。
-    if (beyond === 0 && suspicious()) {
+    // 🎯 v1.34 留下的最后一发：一次就要 2000 条。
+    //    ⚠️ **在唯一的真实样本上没捞到任何东西，别把它当成有效。**
+    //    2026-08-10，一位用户那段对话（官方引继码导出 2971 条、接口只给 1000）上，
+    //    试过的三种都停在 1000：`500×2 页` / `从第 3 页往后要` / `一次要 2000`。
+    //    （「换小页 100 也停在 1000」是**另一位**用户的数据，别把两个人的证据拼成一条。）
+    //    留着它是因为便宜：只有**长段、而且正好拿满 total** 时才多问一次。
+    if (beyond === 0 && r.expected !== null && r.expected >= 1000 && r.out.length === r.expected) {
       beyond += await sweep(2000, 1);
       if (beyond) r.expected = r.out.length;
     }
@@ -590,7 +587,8 @@
     return {
       dialogs: out,
       expected,
-      beyond,                          // 接口报的 total 之外还捞回来多少条（v1.33）
+      beyond,                          // 比接口自报的 total 多拿到多少条（>0 ＝ total 撒了谎）
+      earliest: out.length ? String(out[0].createdTime || '').slice(0, 10) : '',
       incomplete: !!(stopped || short),
       reason: stopped
         || (short
@@ -1076,6 +1074,13 @@
       if (r.beyond) {
         report(`  📈 接口说只有 ${r.dialogs.length - r.beyond} 条，往后又翻出 ${r.beyond} 条，实际共 ${r.dialogs.length} 条。`);
       }
+      // 🔎 长段体检（v1.35）：把「接口说多少 / 实际多少 / 最早一条是哪天」摊开。
+      //    这一行是为了**结束来回**：用户自己就能判断「是不是缺了前面」，
+      //    不用再导第二遍、也不用回来问我们。同样的话会写进 00_目录.md。
+      if (r.dialogs.length >= 500) {
+        report(`  🔎 长段体检：接口说 ${r.expected == null ? '?' : r.expected} 条，实际取到 ` +
+               `${r.dialogs.length} 条，最早一条 ${r.earliest || '未知'}。`);
+      }
       if (r.incomplete) {
         opts.incompleteCount = (opts.incompleteCount || 0) + 1;
         // 光报个数量没用 —— 用户拿到「有 2 段没导完整」之后只能一个个文件点开找。
@@ -1129,6 +1134,7 @@
         incomplete: !!r.incomplete,
         expectedCount: r.expected,
         messageCount: dialogs.length,
+        earliest: r.earliest,
         dialogs,
       });
 
@@ -1881,6 +1887,12 @@ ${ncxpts.join('\n')}
             let mark = '';
             if (s.fromArchiveOnly) mark += '　🔴 只有存档摘要（文件里有救法）';
             if (s.mergedFrom && s.mergedFrom.length) mark += `　🔁 已合并 ${s.mergedFrom.length} 段重复的`;
+            // 长段（v1.35）：把「接口说多少 / 最早一条是哪天」写在目录里。
+            // 面板一关日志就没了，而这一行是用户判断「是不是缺了前面」的唯一凭据。
+            if (s.messageCount >= 500) {
+              mark += `　🔎 接口说 ${s.expectedCount == null ? '?' : s.expectedCount} 条` +
+                      (s.earliest ? `，最早 ${s.earliest}` : '');
+            }
             return `${(bt ? bt.seqBase : 0) + i + 1}. [${f.name}](${linkTarget(f.name)})　${s.messageCount} 条${mark}`;
           }).join('\n') +
           '\n' +
