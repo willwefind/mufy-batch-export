@@ -167,6 +167,16 @@ Tampermonkey 会自动弹出一个安装页面，点 **安装** 就好。
   右上角「**检查更新**」。
 - **当初是自己复制粘贴装的**：**不会自动更新**，得再走一遍上面那个链接重装一次
   （或者把旧脚本内容整个替换成新的）。
+- **iPhone / iPad（Safari + Userscripts）**：**不会自动更新，但更新只要点两下**——
+  用 Safari 打开下面这个网址，页面上会出现一条
+  「**Userscript Installed: Tap to re-install**」，**点它**就覆盖成新版了。
+
+  <https://raw.githubusercontent.com/willwefind/mufy-batch-export/main/mufy-batch-export.user.js>
+
+  > 🚨 **点之前先把页面下拉刷新一下**（那个网址有几分钟缓存，不刷新可能装到的还是旧版）。
+  > 装完**回 mufy 那个标签页刷新一次**才生效 —— 和第一次装脚本时一样。
+  > 那条横幅没出现的话，就全选复制页面里的全部文字，
+  > ᴀA → Userscripts → 打开「Mufy 批量导出聊天记录」→ 全选删掉旧的 → 粘贴 → 保存。
 
 装完在 Tampermonkey 面板里看一眼版本号是不是 **1.33.0**，或者打开导出面板，
 标题右边会写着 `v1.33`。
@@ -1162,6 +1172,14 @@ md 里会留着原始 HTML，用支持 HTML 的阅读器打开还是原来的样
 <https://raw.githubusercontent.com/willwefind/mufy-batch-export/main/mufy-batch-export.user.js>
 
 然后点地址栏左边的 **ᴀA / 拼图图标 → Userscripts → 新建脚本**，粘贴进去保存。
+
+> 💡 **更省事的一种**：直接在 Safari 里打开上面那个网址，页面上多半会自己冒出一条
+> 「**Userscript Installed / Tap to install**」的横幅，**点它就装好了**，不用复制粘贴。
+> **以后更新也走这条**：再打开一次这个网址 → 横幅变成
+> 「**Tap to re-install**」→ 点一下就覆盖成新版。
+> （🚨 点之前先**下拉刷新**一下页面 —— 那个网址有几分钟缓存，不刷新可能装到的还是旧版。
+> 装完记得回 mufy 页面刷新一次，理由见下面那条。
+> 想确认版本：打开导出面板，标题右边写着 `v1.33` 就是新的。）
 
 > 🚨 **保存完，回到 mufy 那个标签页刷新一次。** 脚本只在**页面加载的那一刻**注入，
 > 你装脚本时开着的那个标签页是"装之前"的，不刷新就永远不出按钮
