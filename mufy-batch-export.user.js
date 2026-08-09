@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.32.0
+// @version      1.33.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -506,6 +506,41 @@
       if (r2.stopped && !r.stopped && r.out.length < r.expected) r.stopped = r2.stopped;
     }
 
+    // 🔴🔴 v1.33：「拿满了」不等于「拿全了」。
+    //    一位用户拿 mufy 官方导出对过账：同一段对话官方那边有 2971 条，
+    //    而 dialogs 接口的 total 和我们实际拿到的**都是 1000** —— 也就是说
+    //    **total 本身就是被截过的**。两个数一样，脚本就以为自己拿全了，
+    //    连一句警告都不会给（这比少拿更危险：它是静默的）。
+    //    而上面那个循环恰好停在 out.length >= expected —— 第 3 页从来没被问过。
+    //    → 数字可疑时（正好拿满、且是 500 的整数倍）就多问几页；有就接着翻。
+    //    普通对话（几十条）永远进不来这个分支，一次多余的请求都不会发。
+    let beyond = 0;
+    if (r.expected !== null && r.expected > 0 && r.out.length === r.expected && r.expected % 500 === 0) {
+      const seen = new Set(r.out.map((m) => m.dialogsId));
+      let page = r.expected / 500 + 1;
+      for (;;) {
+        let d;
+        try {
+          d = await api(
+            `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}&characterId=${encodeURIComponent(characterId)}` +
+              `&pageNum=${page}&pageSize=500`
+          );
+        } catch (e) {
+          break;                       // 探测失败不算错：这本来就是额外多问的一句
+        }
+        const rows = (d && d.data) || [];
+        const fresh = rows.filter((m) => !seen.has(m.dialogsId));
+        for (const m of fresh) { seen.add(m.dialogsId); r.out.push(m); }
+        beyond += fresh.length;
+        if (!fresh.length || (d && d.hasNext === false)) break;
+        page += 1;
+        if (page > 500) break;
+        await sleep(120);
+      }
+      // 真捞到了 → total 是假的，以实际拿到的为准，否则下面会误报「多拿了」
+      if (beyond) r.expected = r.out.length;
+    }
+
     const out = r.out, expected = r.expected, stopped = r.stopped;
     out.sort((a, b) => new Date(a.createdTime || 0) - new Date(b.createdTime || 0));
 
@@ -514,6 +549,7 @@
     return {
       dialogs: out,
       expected,
+      beyond,                          // 接口报的 total 之外还捞回来多少条（v1.33）
       incomplete: !!(stopped || short),
       reason: stopped
         || (short
@@ -994,6 +1030,11 @@
       const r = await getDialogs(item.sessionId, characterId);
       let dialogs = r.dialogs;
       let err = r.incomplete ? r.reason : null;
+      // 接口报的总数是假的、我们又往后多翻出了东西 —— 这件事必须说一声，
+      // 不然用户会以为「1000 条」就是全部（这正是 v1.33 要修的那个静默）。
+      if (r.beyond) {
+        report(`  📈 接口说只有 ${r.dialogs.length - r.beyond} 条，往后又翻出 ${r.beyond} 条，实际共 ${r.dialogs.length} 条。`);
+      }
       if (r.incomplete) {
         opts.incompleteCount = (opts.incompleteCount || 0) + 1;
         // 光报个数量没用 —— 用户拿到「有 2 段没导完整」之后只能一个个文件点开找。
