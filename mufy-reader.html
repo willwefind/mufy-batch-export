@@ -144,6 +144,16 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
               border-left:2px solid var(--line);padding-left:18px}
 :root[data-hideme="1"] .msg.me{display:none}  /* ⚠️ 这个 "1" 必须带引号：CSS 属性选择器的值只能是标识符或字符串，而标识符不能以数字开头。写成 [data-hideme=1] 整条规则会被解析器直接丢掉——按钮照点、属性照设、文字照变，就是不生效（真踩过，用户报「点了完全没反应」）。 */
 #nav{max-width:var(--cw);margin:0 auto;padding:0 32px 90px;display:flex;gap:12px}
+/* 一键回顶 / 回底：内容够长时才出现，固定在右下角，手机上也够得着。
+   #main 已经是 scroll-behavior:smooth，所以是滑过去的，不是瞬移。 */
+#jumpers{position:fixed;right:18px;bottom:22px;z-index:30;display:none;flex-direction:column;gap:8px}
+#jumpers.on{display:flex}
+#jumpers button{width:38px;height:38px;border-radius:12px;cursor:pointer;
+  background:var(--panel);backdrop-filter:blur(14px);border:1px solid var(--line);
+  color:var(--dim);font:inherit;font-size:15px;line-height:1;padding:0}
+#jumpers button:hover{color:var(--glow);border-color:var(--glow)}
+@media (max-width:760px){#jumpers{right:12px;bottom:14px}
+  #jumpers button{width:42px;height:42px}}
 #pgind{flex:0 0 auto;align-self:center;color:var(--faint);font-size:12.5px;letter-spacing:.05em;
   min-width:72px;text-align:center;user-select:none}
 /* 跳页输入框：长得像页码本身，不要像个表单控件。数字上下箭头也去掉。 */
@@ -230,6 +240,10 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
   </div>
 
   <div id="page"></div>
+  <div id="jumpers">
+    <button id="toTop" title="回到顶部（Home）">↑</button>
+    <button id="toEnd" title="到最底部（End）">↓</button>
+  </div>
   <div id="nav">
     <button id="prev" disabled>← 上一段</button>
     <span id="pgind"></span>
@@ -691,6 +705,7 @@ function openCap(j, page) {
   }
 
   $('main').scrollTop = 0;
+  syncJumpers();
   renderList();
   localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, cap: j, page: S.page }));
 }
@@ -779,10 +794,28 @@ function save() {
   </div>`;
 })();
 
+/* 一键回顶 / 回底。长段一页能有近万字，滑到底再滑回来很折磨；
+   分页模式下想去最后一页请用底部那个页码输入框，这两颗只管当前这一屏内容。 */
+function scrollMain(to) {
+  const m = $('main');
+  m.scrollTo({ top: to === 'end' ? m.scrollHeight : 0, behavior: 'smooth' });
+}
+$('toTop').onclick = () => scrollMain('top');
+$('toEnd').onclick = () => scrollMain('end');
+function syncJumpers() {
+  const m = $('main');
+  // 内容不比屏幕高多少就别占地方了
+  $('jumpers').classList.toggle('on', m.scrollHeight > m.clientHeight + 200);
+}
+$('main').addEventListener('scroll', syncJumpers, { passive: true });
+addEventListener('resize', syncJumpers);
+
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === 'ArrowRight' && !$('next').disabled) goNext();
   if (e.key === 'ArrowLeft' && !$('prev').disabled) goPrev();
+  if (e.key === 'Home') { e.preventDefault(); scrollMain('top'); }
+  if (e.key === 'End') { e.preventDefault(); scrollMain('end'); }
   if (e.key === 'Escape') $('side').classList.toggle('hide');
 });
 </script>
