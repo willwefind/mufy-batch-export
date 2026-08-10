@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.36.0
+// @version      1.37.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.36.0';
+  const VERSION = '1.37.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -316,17 +316,36 @@
   // files: [{ name, text | bytes, date, store }]
   //   bytes = 已经是 Uint8Array 的二进制（封面 PNG 走这条）
   //   store = 强制不压缩。EPUB 的 mimetype 必须是第一个条目且不压缩，否则很多阅读器不认。
-  async function makeZip(files, onProgress, mime) {
+  //  ⚠️ 这里的建议以前是写死的三句，结果对两种人是错的（2026-08-10 用户报上来的）：
+  //     · 导 **EPUB** 的人——EPUB 本身就是个 zip，走的也是这个函数，
+  //       可它**根本不产出 JSON**，"取消勾选附带 JSON"对他毫无作用；
+  //     · **已经填过分批**的人——还劝他"填成 20"是让他往回走。
+  //     所以现在传 opts 进来，看人下菜。
+  async function makeZip(files, onProgress, mime, opts) {
     // 体量太大就先打个招呼。有用户在 Safari 上导一个 352 段存档的角色时遇到：
     // 日志显示导出完毕，**页面却自己刷新了一下**，然后什么文件都没有。
     // 那不是刷新，是标签页被系统回收后重载了——页面一没，blob 跟着没，
     // 连「⬇ 手动保存」都救不回来。所以这话必须在开跑前说，事后说没用。
     const bulk = files.reduce((n, f) => n + (f.text ? f.text.length : 0), 0);
     if (bulk > 8e6) {
+      const o = opts || {};
       say(`  ⚠️ 这一包很大（约 ${(bulk / 1e6).toFixed(1)}M 字）。手机浏览器可能扛不住。`);
       say('     症状是「显示导出完毕、页面自己刷新了一下、然后没有文件」＝标签页被系统回收了。');
-      say('     建议：把面板上的「每包最多多少段对话」填成 20 再导一次（这是最有效的一招）；');
-      say('     或者取消勾选「附带 JSON 完整备份」（那份通常占一半以上）；再不行就用电脑导。');
+      // 分批切的是**段数**，切不开"单段特别长"。段数已经到底时再劝人调小是耍人。
+      if (o.chunk) {
+        say(`     你已经填了「每包最多 ${o.chunk} 段」。还能再调小就调（比如 ${Math.max(1, Math.floor(o.chunk / 2))}）；`);
+        say('     ⚠️ 但如果这个角色本来就只有一两段，那就已经到底了 ——');
+        say('     **分批切的是「段数」，切不开「一整段特别长」这种**，再填小也没用。');
+      } else {
+        say('     建议：先把面板上的「每包最多多少段对话」填成 20 再导一次（这是最有效的一招）。');
+      }
+      if (o.json && o.shape !== 'epub') {
+        say('     还可以取消勾选「附带 JSON 完整备份」（那份通常占一半以上）。');
+      } else if (o.shape === 'epub') {
+        // 别让人去关一个在这条路上根本不存在的开关
+        say('     （你导的是电子书，本来就不带 JSON，去关那个勾选没有用。）');
+      }
+      say('     以上都到头了就**用电脑导这个角色** —— 桌面浏览器的内存额度宽得多，这是最稳的。');
     }
 
     const enc = new TextEncoder();
@@ -755,7 +774,7 @@
     }
 
     report(`打包 ${files.length} 个文件…`);
-    const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+    const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`), undefined, opts);
     downloadBlob(base + '.zip', zip);
     report(`✅ ${masks.length} 个面具已打包，ZIP 大小 ${(zip.size / 1048576).toFixed(2)} MB`);
   }
@@ -958,7 +977,7 @@
     });
 
     report(`打包 ${files.length} 个文件…`);
-    const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+    const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`), undefined, opts);
     downloadBlob(base + '.zip', zip);
     report(`✅ ${cards.length} 张角色卡已打包，ZIP 大小 ${(zip.size / 1048576).toFixed(2)} MB`);
     if (missing) report(`🔴 有 ${missing} 张图片没抓下来（卡片开头有记）。`);
@@ -1562,7 +1581,7 @@ ${bodyHtml}
   // pack → EPUB Blob。没有一章能成书就返回 null。
   // coverFn(章数) → Promise<Uint8Array|null>：封面得等章数点清楚了才画（副标题上写着章数），
   // 所以这里收的是个回调而不是现成的图。传 null 就是不要封面。
-  async function buildEpub(pack, coverFn) {
+  async function buildEpub(pack, coverFn, opts) {
     const name = pack.name || '未命名';
     const cid = pack.characterId || '';
     const uid = 'urn:uuid:' + (await uuid5('mufy:' + (cid || name)));
@@ -1688,7 +1707,7 @@ ${ncxpts.join('\n')}
     }
     for (const c of chapters) files.push(F(`OEBPS/text/${c.file}`, c.xhtml));
 
-    const blob = await makeZip(files, null, 'application/epub+zip');
+    const blob = await makeZip(files, null, 'application/epub+zip', { ...(opts || {}), shape: 'epub' });
     return { blob, chapters: chapters.length, total };
   }
 
@@ -1786,7 +1805,7 @@ ${ncxpts.join('\n')}
       // 书名就是文件名，不加 mufy_ 前缀也不加时间戳 —— 导进图书类 App 之后，
       // 书架上显示的就是这一行，让它干干净净的。
       report(`【${pack.name}】做成电子书…`);
-      const r = await buildEpub(pack, (n) => drawCover(pack.name, `${n} 章`));
+      const r = await buildEpub(pack, (n) => drawCover(pack.name, `${n} 章`), opts);
       if (!r) { report(`【${pack.name}】没有可成书的内容，跳过。`); return false; }
       downloadBlob(`${stem}${tag}.epub`, r.blob);
       report(`  ${r.chapters} 章 / ${r.total} 条　${(r.blob.size / 1048576).toFixed(2)} MB`);
@@ -1831,7 +1850,7 @@ ${ncxpts.join('\n')}
       });
 
       report(`【${pack.name}】打包 ${files.length} 个文件…`);
-      const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+      const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`), undefined, opts);
       downloadBlob(base + '_酒馆.zip', zip);
       return true;
     }
@@ -1926,7 +1945,7 @@ ${ncxpts.join('\n')}
       }
 
       report(`【${pack.name}】打包 ${files.length} 个文件…`);
-      const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`));
+      const zip = await makeZip(files, (a, b) => report(`  压缩 ${a}/${b}`), undefined, opts);
       downloadBlob(base + '.zip', zip);
       return true;
     } else {
