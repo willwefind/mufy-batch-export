@@ -146,6 +146,11 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
 #nav{max-width:var(--cw);margin:0 auto;padding:0 32px 90px;display:flex;gap:12px}
 #pgind{flex:0 0 auto;align-self:center;color:var(--faint);font-size:12.5px;letter-spacing:.05em;
   min-width:72px;text-align:center;user-select:none}
+/* 跳页输入框：长得像页码本身，不要像个表单控件。数字上下箭头也去掉。 */
+#pgind input{width:3.4em;padding:2px 4px;margin:0 2px;border-radius:7px;border:1px solid var(--line);
+  background:transparent;color:var(--ink);font:inherit;text-align:center;-moz-appearance:textfield}
+#pgind input::-webkit-outer-spin-button,#pgind input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+#pgind input:focus{outline:none;border-color:var(--ink)}
 #nav button{flex:1;padding:13px;border-radius:12px;cursor:pointer;font-family:inherit;font-size:13.5px;
             background:rgba(232,169,78,.08);color:var(--dim);border:1px solid var(--line)}
 #nav button:hover:not(:disabled){color:var(--glow);border-color:var(--glow)}
@@ -186,16 +191,19 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
     <button data-fs="1">A+</button>
     <select id="lh"><option value="1.8">行距紧</option><option value="2.0" selected>行距中</option><option value="2.3">行距松</option></select>
     <select id="cw"><option value="620">窄</option><option value="720" selected>中</option><option value="880">宽</option></select>
-    <select id="ff">
+    <select id="ff" title="字体要你的设备里装了才生效。手机上多数只有系统自带那几款（苹方/宋体/楷体/黑体）能切得动">
       <option value="'KingHwaOldSong','京華老宋体',serif" selected>京華老宋</option>
       <option value="'ZcoolXiaoWei','ZCOOL XiaoWei',serif">站酷小薇</option>
       <option value="'ChaohuaB','Songti SC','SimSun',serif">朝華正文</option>
+      <option value='"Songti SC","STSong","Noto Serif CJK SC","SimSun",serif'>系统宋（手机可用）</option>
+      <option value='"PingFang SC","苹方","Noto Sans CJK SC","Microsoft YaHei",sans-serif'>系统黑（手机可用）</option>
+      <option value='"Kaiti SC","STKaiti","楷体",serif'>系统楷（手机可用）</option>
       <option value="'ZcoolQingKe','ZCOOL QingKe HuangYou',sans-serif">庆科黄油</option>
       <option value='"Noto Serif SC","Source Han Serif SC","STSong","SimSun",serif'>思源宋</option>
-      <option value='"KaiTi","STKaiti","楷体",serif'>楷体</option>
+      <option value='"KaiTi","STKaiti","Kaiti SC","楷体",serif'>楷体</option>
       <option value='"FangSong","STFangsong","仿宋",serif'>仿宋</option>
-      <option value='"STSong","SimSun","宋体",serif'>宋体</option>
-      <option value='"Microsoft YaHei","微软雅黑","PingFang SC",sans-serif'>雅黑</option>
+      <option value='"STSong","SimSun","Songti SC","宋体",serif'>宋体</option>
+      <option value='"Microsoft YaHei","微软雅黑","PingFang SC","Noto Sans CJK SC",sans-serif'>雅黑</option>
       <option value='"DengXian","等线","PingFang SC",sans-serif'>等线</option>
     </select>
     <select id="th">
@@ -663,9 +671,24 @@ function openCap(j, page) {
   $('next').disabled = !hasNext;
   $('prev').textContent = S.page > 0 ? '← 上一页' : '← 上一段';
   $('next').textContent = S.page < lastPage ? '下一页 →' : '下一段 →';
-  $('pgind').textContent = pages.length > 1
-    ? `${S.page + 1} / ${pages.length} 页`
-    : (S.mode === 'page' ? '就这一页' : '');
+  // 跳页：162 页的存档靠 ←/→ 一页页翻是不现实的，所以页码本身就是输入框。
+  // 用 input 而不是 prompt()，手机上也点得动、不会被拦。
+  if (pages.length > 1) {
+    $('pgind').innerHTML = `第 <input id="pgjump" type="number" min="1" max="${pages.length}" ` +
+      `value="${S.page + 1}" aria-label="跳到第几页"> / ${pages.length} 页`;
+    const jump = $('pgjump');
+    const go = () => {
+      const n = Math.round(Number(jump.value));
+      if (!Number.isFinite(n)) return;
+      const t = Math.max(1, Math.min(n, pages.length));
+      if (t - 1 !== S.page) openCap(S.cap, t - 1); else jump.value = t;
+    };
+    jump.onchange = go;
+    jump.onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); jump.blur(); go(); } };
+    jump.onfocus = () => jump.select();
+  } else {
+    $('pgind').textContent = S.mode === 'page' ? '就这一页' : '';
+  }
 
   $('main').scrollTop = 0;
   renderList();
@@ -736,8 +759,10 @@ function save() {
   bootFromCache();     // 有缓存就直接开，不用选文件
 })();
 
-/* 手机上选不了文件夹（webkitdirectory 是桌面特性），布局也是按桌面排的。
-   与其让人对着一个坏掉的界面猜，不如直接说清楚，并指向 EPUB。 */
+/* 🔴 2026-08-10 改：这里原来写着「这个阅读器是给电脑用的」——**是我们在说反话**。
+   手机不支持的只有「选择文件夹」（webkitdirectory 是桌面特性），
+   而旁边那个「直接选 zip 文件」的按钮在手机上一直是好使的，
+   已经有用户自己摸索出来在手机上读了。别再劝退，把那条路指出来。 */
 (function mobileNotice() {
   const narrow = Math.min(screen.width, screen.height) < 700 ||
                  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -745,12 +770,12 @@ function save() {
   const e = $('empty');
   if (!e) return;
   e.innerHTML = `<div style="max-width:26em">
-    <b>这个阅读器是给电脑用的</b><br><br>
-    手机浏览器不支持「选择文件夹」，界面也是按大屏排的，在这里用不了。<br><br>
-    <span style="opacity:.75">想在手机上读，请用 <b>EPUB</b>：
-    用仓库里的 <code>make-epub.py</code> 把导出的 zip 转成电子书，
-    每个角色一本、每段对话一章，导进微信读书 / Apple Books 就能翻，
-    目录、书签、进度都是原生的。</span>
+    <b>手机上请点「直接选 zip 文件」</b><br><br>
+    上面那个「选择存档文件夹」是电脑浏览器才有的能力，手机上点了没反应——
+    <b>用它下面那个按钮</b>，在「文件」里挑出你导出的 zip（可以多选），一样能读。<br><br>
+    <span style="opacity:.75">界面是按大屏排的，手机上会挤一点。
+    想更舒服就用 <b>EPUB</b>：导出时「输出方式」直接选「每个角色一本电子书」，
+    导进微信读书 / Apple Books 翻，目录、书签、进度都是原生的。</span>
   </div>`;
 })();
 
