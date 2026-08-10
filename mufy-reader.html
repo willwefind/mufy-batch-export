@@ -775,9 +775,10 @@ function save() {
 })();
 
 /* 🔴 2026-08-10 改：这里原来写着「这个阅读器是给电脑用的」——**是我们在说反话**。
-   手机不支持的只有「选择文件夹」（webkitdirectory 是桌面特性），
-   而旁边那个「直接选 zip 文件」的按钮在手机上一直是好使的，
-   已经有用户自己摸索出来在手机上读了。别再劝退，把那条路指出来。 */
+   实测（安卓用户 2026-08-10）：「选择文件夹」在手机上其实也点得动，
+   只是 webkitdirectory 在手机上退化成普通文件选择器、**一次只挑得了一个**；
+   而旁边那个「直接选 zip 文件（可多选）」一次就能把所有角色装进来。
+   已经有用户自己摸索出来在手机上读了。别再劝退，把那条**更快的**路指出来。 */
 (function mobileNotice() {
   const narrow = Math.min(screen.width, screen.height) < 700 ||
                  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -785,9 +786,10 @@ function save() {
   const e = $('empty');
   if (!e) return;
   e.innerHTML = `<div style="max-width:26em">
-    <b>手机上请点「直接选 zip 文件」</b><br><br>
-    上面那个「选择存档文件夹」是电脑浏览器才有的能力，手机上点了没反应——
-    <b>用它下面那个按钮</b>，在「文件」里挑出你导出的 zip（可以多选），一样能读。<br><br>
+    <b>手机上请点「直接选 zip 文件（可多选）」</b><br><br>
+    在「文件」里<b>把所有角色的 zip 一次全选进来</b>，一步到位。<br>
+    上面那个「选择存档文件夹」手机上<b>也点得动</b>，但手机的文件选择器
+    一次只挑得了一个，几十个角色会点到崩溃 —— 别走那条。<br><br>
     <span style="opacity:.75">界面是按大屏排的，手机上会挤一点。
     想更舒服就用 <b>EPUB</b>：导出时「输出方式」直接选「每个角色一本电子书」，
     导进微信读书 / Apple Books 翻，目录、书签、进度都是原生的。</span>
