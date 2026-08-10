@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.35.0
+// @version      1.36.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.35.0';
+  const VERSION = '1.36.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -2081,10 +2081,7 @@ ${ncxpts.join('\n')}
       <div id="mufyx-tidytip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
         这一条导的不是对话，「清理 think」对它没有作用。
       </div>
-      <div id="mufyx-epubtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
-        直接出电子书，不用装 Python。导进微信读书 / 图书 / 静读天下就能当小说翻。<br>
-        书里一律是清理过的正文；要留原始数据请另导一次 ZIP。
-      </div>
+      <div id="mufyx-shapetip" style="font-size:11.5px;color:#a79ecb;margin:2px 0 0"></div>
       <label><input type="checkbox" id="mufyx-tidy" checked> 清理 think / 状态栏 HTML</label>
       <label><input type="checkbox" id="mufyx-json" checked> 附带 JSON 完整备份</label>
       <div class="row">
@@ -2141,7 +2138,23 @@ ${ncxpts.join('\n')}
       shapeSel.querySelector('option[value=one]').textContent =
         isCard ? '全部合并成一份 Markdown（不含图片）' : '全部合并成一份 Markdown';
 
-      $('mufyx-epubtip').style.display = shapeSel.value === 'epub' ? 'block' : 'none';
+      // 四个输出方式各配一句人话。零基础的人是在**这里**做决定的，
+      // 只在 README 里写清楚等于没写 —— 他不会先去读说明书。
+      const SHAPE_TIP = {
+        split: '<b>做备份就选它（默认）。</b>出来是一个压缩包：一段对话一个文件，' +
+               '外加目录和 <code>_原始数据.json</code>（一字不改的原文）。' +
+               '电脑上用网页阅读器能直接打开，不用解压。',
+        one:   '<b>想一口气从头读到尾就选它。</b><b>一个角色出一份</b>（不是所有角色挤进一个文件），' +
+               '开场白和每段依次排下来。比 ZIP 少一个目录索引；' +
+               '勾了 JSON 的话会<b>另外单独下一个 .json</b>，别以为漏了。',
+        epub:  '<b>当小说读就选它。</b>直接出电子书，导进微信读书 / 图书 / 静读天下就能翻。' +
+               '书里一律是清理过的正文，<b>不含原始数据</b> —— 要备份请另导一次 ZIP。',
+        tavern:'<b>只有要导进酒馆才选它。</b>一段存档一个 .jsonl，附导入说明。' +
+               '<b>不放开场白</b>（酒馆会用角色卡自带的那条，塞进去会重复）。',
+      };
+      const MASK_TIP = '这一条导的不是聊天记录，所以「电子书」「酒馆」都用不上；' +
+                       'ZIP 是一件一个文件＋目录＋原始 JSON，合并是全部接成一份。';
+      $('mufyx-shapetip').innerHTML = other ? MASK_TIP : (SHAPE_TIP[shapeSel.value] || '');
     };
     $('mufyx-scope').onchange = syncUI;
     $('mufyx-shape').onchange = syncUI;
