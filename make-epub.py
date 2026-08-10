@@ -307,12 +307,54 @@ def build_epub(pack, dest):
     return len(chapters), total
 
 
+# ────────────────────── 把同一个角色的多个分批包合成一本 ──────────────────────
+#
+# 对话上百段的角色，导出时要填「每包最多多少段」分批导，于是一个角色出好几个包
+# （文件名带「第几到第几段」）。以前是一个包一本书，几十个包就是几十本，
+# 想通读只能自己拼 —— 有用户为此专门来问「怎么合并成一本」。
+#
+# 好在每个包的 _原始数据.json 自己就带着 batchFrom / totalSessions，
+# 也就是说**它知道自己是第几批、一共该有几段**，所以合并可以做得可验证：
+#   · 按 characterId 分组（没有就退回按角色名）
+#   · 按 batchFrom 排序，段落顺次接起来
+#   · 开场白只在第一批里，取到就用
+#   · **段数加起来对不上 totalSessions 就当场喊出来**（少几段、可能缺哪一批），
+#     绝不静默出一本残书 —— 那比不合并更糟。
+def merge_packs(packs):
+    packs = sorted(packs, key=lambda p: p.get('batchFrom') or 1)
+    base = dict(packs[0])
+    sessions = []
+    for p in packs:
+        sessions.extend(p.get('sessions') or [])
+    base['sessions'] = sessions
+    base['greeting'] = next((p.get('greeting') for p in packs if p.get('greeting')), base.get('greeting'))
+    expect = max((p.get('totalSessions') or 0) for p in packs)
+    return base, expect
+
+
+def group_zips(paths):
+    """→ [(角色名, [pack, ...]), ...]；没有 batchFrom 的包各自成组，行为和以前一样。"""
+    groups, singles = {}, []
+    for path in paths:
+        pack = load_pack(path)
+        if pack.get('batchFrom'):
+            key = pack.get('characterId') or ('name:' + str(pack.get('name')))
+            groups.setdefault(key, []).append(pack)
+        else:
+            singles.append(pack)
+    out = [(safe(x.get('name')), [x]) for x in singles]
+    out += [(safe(v[0].get('name')), v) for v in groups.values()]
+    return out
+
+
 # ────────────────────────── 主流程 ──────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('names', nargs='*', help='只转这些角色（模糊匹配）')
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--no-merge', action='store_true',
+                    help='别把同一个角色的分批包合成一本（回到旧行为：一个包一本）')
     a = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
@@ -322,11 +364,29 @@ def main():
     if a.limit:
         zips = zips[:a.limit]
 
+    paths = [os.path.join(SRC, f) for f in zips]
+    if a.no_merge:
+        jobs = [(safe(load_pack(x).get('name')), [load_pack(x)]) for x in paths]
+    else:
+        jobs = group_zips(paths)
+        merged = sum(1 for _, v in jobs if len(v) > 1)
+        if merged:
+            print('🔗 有 %d 个角色是分批导的，会各自合成一本（想要旧行为加 --no-merge）%s' % (merged, '\n'))
+
     ok = fail = skip = 0
-    for i, fn in enumerate(zips, 1):
+    for i, (name, packs) in enumerate(jobs, 1):
         try:
-            pack = load_pack(os.path.join(SRC, fn))
-            name = safe(pack.get('name'))
+            if len(packs) > 1:
+                pack, expect = merge_packs(packs)
+                got = len(pack.get('sessions') or [])
+                froms = sorted(x.get('batchFrom') or 1 for x in packs)
+                print(f'🔗 {name}：合并 {len(packs)} 个包（第 {froms} 批）→ {got} 段')
+                if expect and got != expect:
+                    # 少了就必须说出来。用户拿到一本"看着挺完整"的残书是最坏的结果。
+                    print(f'   🔴 段数对不上：合起来 {got} 段，但包里写着一共 {expect} 段 '
+                          f'—— 少了 {expect - got} 段，多半是有一批没导下来、或者没放进 {SRC}。')
+            else:
+                pack = packs[0]
             dest = os.path.join(OUT, f'{name}.epub')
             n = 2
             while os.path.exists(dest):          # 重名角色：补序号，别互相覆盖
@@ -334,15 +394,15 @@ def main():
             r = build_epub(pack, dest)
             if not r:
                 skip += 1
-                print(f'  ({i}/{len(zips)}) {name}：没有可成书的内容，跳过')
+                print(f'  ({i}/{len(jobs)}) {name}：没有可成书的内容，跳过')
                 continue
             ch, msgs = r
             ok += 1
-            print(f'✅ ({i}/{len(zips)}) {os.path.basename(dest)}　{ch} 章 / {msgs} 条　'
+            print(f'✅ ({i}/{len(jobs)}) {os.path.basename(dest)}　{ch} 章 / {msgs} 条　'
                   f'{os.path.getsize(dest)/1024:.0f} KB')
         except Exception as e:
             fail += 1
-            print(f'❌ ({i}/{len(zips)}) {fn}：{e}')
+            print(f'❌ ({i}/{len(jobs)}) {name}：{e}')
 
     print(f'\n完成：成书 {ok}，跳过 {skip}，失败 {fail}　→　{OUT}')
     return 0 if fail == 0 else 1
