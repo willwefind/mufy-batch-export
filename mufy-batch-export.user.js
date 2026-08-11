@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.37.0
+// @version      1.38.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.37.0';
+  const VERSION = '1.38.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -1980,7 +1980,8 @@ ${ncxpts.join('\n')}
   #mufyx-recent a{font-size:11.5px;color:#cbbcff;text-decoration:none;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #mufyx-recent a:hover{text-decoration:underline;color:#e6dcff}
-  #mufyx-log{margin-top:12px;max-height:150px;overflow:auto;font-size:11.5px;line-height:1.5;
+  #mufyx-log{margin-top:12px;max-height:min(42vh,260px);overflow:auto;overscroll-behavior:contain;
+    font-size:11.5px;line-height:1.5;
     color:#b8aed6;white-space:pre-wrap;border-top:1px solid rgba(190,170,255,.18);padding-top:8px}
   #mufyx-close{position:absolute;top:10px;right:12px;background:none;border:none;color:#9c93bd;cursor:pointer;
     font-size:15px;padding:0;width:auto;flex:none}
@@ -2200,10 +2201,31 @@ ${ncxpts.join('\n')}
     const log = $('mufyx-log');
     const goBtn = $('mufyx-go');
     const lines = [];
+    // 🔴 2026-08-10 用户报：「导完之后没法往上划，看不到有几个档没导出来，
+    //    被后面的消息顶上去了」。查下来是两件事叠在一起，都在这三行里：
+    //      · `lines.slice(-40)` —— **不是滑不上去，是那些行真的被丢掉了**。
+    //        导两百个角色轻松几百行，40 行连结尾汇总都装不下多少。
+    //      · 每来一行就 `scrollTop = scrollHeight` —— 用户正往上翻的时候会被**拽回底部**，
+    //        于是"看不到"变成了"看到了也留不住"。
+    //    现在：全留（只留一个防失控的上限），而且**只有你本来就贴着底部时才自动跟随**。
+    const LOG_MAX_LINES = 5000;
     const report = (m) => {
       lines.push(m);
-      log.textContent = lines.slice(-40).join('\n');
-      log.scrollTop = log.scrollHeight;
+      // 判「贴着底部」要留一点余量：行高不是整数，滚到底也常差一两像素。
+      // ⚠️ 必须在改内容**之前**量，改完再量就永远是"不在底部"。
+      const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+      if (lines.length > LOG_MAX_LINES) {
+        lines.splice(0, lines.length - LOG_MAX_LINES);
+        log.textContent = lines.join('\n');     // 只有超上限时才整体重建（几乎不会发生）
+      } else {
+        // 🔴 别每来一行就把整份 join 一遍 —— 那是平方级的：
+        //    导两百个角色能有几千行，我自己测的时候把浏览器卡死了 30 秒。
+        //    平时只往后追加一个文本节点。
+        // 第一行要把占位的「准备就绪。」顶掉，不能直接粘在它后面
+        if (lines.length === 1) log.textContent = m;
+        else log.append('\n' + m);
+      }
+      if (atBottom) log.scrollTop = log.scrollHeight;
     };
     logSink = report; // downloadBlob 埋得深，靠这个把「⬇ 文件名 大小」写进同一份日志
 
