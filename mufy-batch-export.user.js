@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.38.0
+// @version      1.39.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.38.0';
+  const VERSION = '1.39.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -152,6 +152,29 @@
   }
 
   // Windows 文件名安全化
+  // 🔴🔴 「文件名是 A 角色、内容却是 B 角色」这个 bug v1.20 修过一次，但只修了**一次运行之内**：
+  //    usedStems 是 per-run 的，一关面板就没了；而 EPUB 的文件名为了书架好看
+  //    **连时间戳都不带**（ZIP 带）。于是两个「洗完之后同名」的角色**分两次单独导**时，
+  //    第二本会被浏览器存成「xxx (1).epub」——谁拿到正名取决于下载先后，名实又对不上了。
+  //    （用户在 v1.38 上仍然报到这个症状。）
+  //    所以把「这个文件名归哪个 characterId」记在 localStorage 里，跨次也认得出来。
+  const NAME_OWNER_KEY = 'mufyx-name-owner';
+  const NAME_OWNER_MAX = 2000;            // 别让它无限长
+  function nameOwners() {
+    try { return JSON.parse(localStorage.getItem(NAME_OWNER_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function rememberName(safe, id) {
+    if (!safe || !id) return;
+    try {
+      const m = nameOwners();
+      if (m[safe] === id) return;
+      m[safe] = id;
+      const keys = Object.keys(m);
+      if (keys.length > NAME_OWNER_MAX) for (const k of keys.slice(0, keys.length - NAME_OWNER_MAX)) delete m[k];
+      localStorage.setItem(NAME_OWNER_KEY, JSON.stringify(m));
+    } catch (e) {}
+  }
+
   function safeName(s) {
     return cut(String(s || '未命名').replace(/[\\/:*?"<>|\r\n\t]/g, '_').replace(/\s+/g, ' ').trim(), 60);
   }
@@ -1059,6 +1082,20 @@
       bySession.set(liveSessionId, { sessionId: liveSessionId, archives: [], current: true });
     }
 
+    // 「只要正在聊的这一段」：用户提的——他只想留当下这一段，不想把几十个老存档也导一遍。
+    // 认哪一段：优先用地址栏里的 sessionId（他此刻正开着的那个），否则退回 lastSessionId。
+    if (opts.liveOnly) {
+      const want = (qs('roleId') === characterId && qs('sessionId')) || liveSessionId;
+      if (!want) {
+        throw new Error('看不出你正在聊哪一段：请在那个角色的聊天页里用这一项，' +
+                        '或者改用「当前角色（本页·全部存档）」。');
+      }
+      const one = bySession.get(want) || { sessionId: want, archives: [], current: true };
+      bySession.clear();
+      bySession.set(want, one);
+      report(`【${name}】只导正在聊的这一段（${want.slice(0, 8)}…）`);
+    }
+
     let list = [...bySession.values()];
     // 🔴 分批必须切在排序之后，否则「第 1–50 段」是按接口返回的顺序切的，
     //    对人没有意义、批次之间也不稳定。这里用存档时间预排一次（新的在前），
@@ -1787,7 +1824,14 @@ ${ncxpts.join('\n')}
 
     // 比对的是规整之后的名字（和上面数重名时用的是同一把尺子）
     const safe = safeName(pack.name);
-    const dup = opts.dupNames && opts.dupNames.has(safe);
+    // 同一次运行里的重名（预扫算出来的）＋ 跨次运行的重名（localStorage 记着的），两种都要挡
+    const owner = nameOwners()[safe];
+    const crossDup = !!(owner && pack.characterId && owner !== pack.characterId);
+    const dup = (opts.dupNames && opts.dupNames.has(safe)) || crossDup;
+    if (crossDup) {
+      report(`  ⚠️ 文件名「${safe}」以前被另一个角色用过，这次补上角色 ID 区分，免得两份撞在一起。`);
+    }
+    if (pack.characterId && !owner) rememberName(safe, pack.characterId);
     // ⚠️ 判重的键必须**带上批次标签**：同一个角色分成几批时，
     //    每批的文件名本来就靠这个标签区分，不带它会把自己的第 2、3 批当成撞名，
     //    白白补上 characterId 和下划线（真踩过，日志里出现过 `_b5241d__`）。
@@ -2054,7 +2098,8 @@ ${ncxpts.join('\n')}
       <h3>Mufy 批量导出 <span style="opacity:.5;font-weight:400">v${VERSION.replace(/\.0$/, '')}</span></h3>
       <label>范围
         <select id="mufyx-scope">
-          <option value="current">当前角色（本页）</option>
+          <option value="current">当前角色（本页·全部存档）</option>
+          <option value="live">当前角色 · 只要正在聊的这一段</option>
           <option value="chatted">全部聊过的角色（慢）</option>
           <option value="followed">全部已关注角色（慢，含没聊过的）</option>
           <option value="manual">手动填角色 ID</option>
@@ -2062,6 +2107,10 @@ ${ncxpts.join('\n')}
           <option value="cards">我创建的角色卡（全部）</option>
         </select>
       </label>
+      <div id="mufyx-livetip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        <b>只导你此刻正开着的这一段对话</b>，不碰这个角色的其它存档。
+        想把这个角色的全部存档都导下来，选上面那个「当前角色（本页·全部存档）」。
+      </div>
       <div id="mufyx-masktip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
         导的是「人设面具」库，和聊天记录无关。<br>
         每个面具一份，按 备注／名称／性别／我的描述／我的喜好／指令 分好节。
@@ -2127,6 +2176,11 @@ ${ncxpts.join('\n')}
       const epubOpt = shapeSel.querySelector('option[value=epub]');
 
       $('mufyx-idwrap').style.display = scope === 'manual' ? 'block' : 'none';
+      // 只导一段时，「每包最多多少段」没有意义 —— 与其让它静静地不起作用，不如直接说
+      const liveOnly = scope === 'live';
+      $('mufyx-livetip').style.display = liveOnly ? 'block' : 'none';
+      $('mufyx-chunk').disabled = liveOnly;
+      $('mufyx-chunk').placeholder = liveOnly ? '只导一段，用不上分包' : '留空＝一个角色一个包';
       // 「从第 N 个开始」只对成批跑的两个范围有意义（单个角色、面具、角色卡都不需要）
       const batch = scope === 'chatted' || scope === 'followed';
       $('mufyx-startwrap').style.display = batch ? 'block' : 'none';
@@ -2246,6 +2300,7 @@ ${ncxpts.join('\n')}
       oldestFirst: shape === 'epub',
     };
     const scope = $('mufyx-scope').value;
+    opts.liveOnly = scope === 'live';   // 只导「正在聊的这一段」
 
     goBtn.disabled = true;
     lines.length = 0;
@@ -2288,7 +2343,7 @@ ${ncxpts.join('\n')}
       }
 
       let ids = []; // [{ id, live }]
-      if (scope === 'current') {
+      if (scope === 'current' || scope === 'live') {
         const rid = qs('roleId');
         if (!rid) throw new Error('当前页面地址里没有 roleId，请在某个角色的聊天页里用，或改用「手动填角色 ID」。');
         ids = [{ id: rid, live: null }];
