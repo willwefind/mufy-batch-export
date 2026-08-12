@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.39.0
+// @version      1.40.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.39.0';
+  const VERSION = '1.40.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -206,8 +206,10 @@
   const RECENT_MAX_BYTES = 64 * 1024 * 1024; // 兜底也不能把她的内存吃光
   const recentFiles = [];
 
-  function rememberFile(name, url, size) {
-    recentFiles.push({ name, url, size });
+  // ⚠️ 连 blob 本身一起留着不额外占内存：createObjectURL 本来就把它钉住了，
+  //    revoke 之前都不会被回收。留个引用才能走「📤 分享」那条路（Web Share 要 File，不认 URL）。
+  function rememberFile(name, url, size, blob) {
+    recentFiles.push({ name, url, size, blob });
     let total = recentFiles.reduce((n, f) => n + f.size, 0);
     // 至少留一个，其余按「条数」和「总字节」两个上限一起淘汰
     while (recentFiles.length > 1 && (recentFiles.length > RECENT_MAX || total > RECENT_MAX_BYTES)) {
@@ -218,6 +220,30 @@
     renderRecent();
   }
 
+  // 这个文件能不能走系统分享面板。
+  // 🔴 必须**逐个文件**探，不能只探一次浏览器：Chrome 对可分享的文件类型有白名单，
+  //    同一台机器上 .md 能分享、.zip 未必能。探不过就不画那个按钮 —— 宁可没有，
+  //    也别摆一个点了没反应的按钮（这一整批修的就是"点了没反应"）。
+  function shareableFile(f) {
+    if (!f.blob || !navigator.share || !navigator.canShare) return null;
+    try {
+      const file = new File([f.blob], f.name, { type: f.blob.type || 'application/octet-stream' });
+      return navigator.canShare({ files: [file] }) ? file : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 🔴 2026-08-12 用户报：自动下载没出现，**点「⬇ 手动保存」也一点反应都没有**。
+  //    README 里原本写着「手动点属于用户操作，浏览器基本不会拦」—— 这位用户就是反例，
+  //    那句话已经收回。已知能让 `<a download>` 整个哑掉的情况：
+  //      · 微信 / QQ / 小红书这类 App 内置浏览器（WebView）根本不给下载；
+  //      · 迅雷 / IDM 之类下载器扩展把点击抢走，而它们接不住 blob: 链接；
+  //      · 这个站的下载权限被设成了「阻止」。
+  //    所以同一份文件给三条出路，被拦的是哪个动作就换一个：
+  //      ⬇ 存   —— 老路（`<a download>`）
+  //      📤 分享 —— 系统分享面板（手机上最管用：能直接存进「文件」或发给自己）
+  //      ↗ 打开 —— 新标签页，不带 download 属性，绕开"下载"这个动作本身
   function renderRecent() {
     const box = panel && panel.querySelector('#mufyx-recent');
     if (!box) return;
@@ -227,13 +253,57 @@
     tip.className = 'rt';
     tip.textContent = `下载列表里没有？点下面这些手动保存（留最近 ${recentFiles.length} 个）：`;
     box.appendChild(tip);
+
+    // 分享失败时的说明落在这里，别只写进日志（日志可能已经滚很远了）
+    const note = document.createElement('div');
+    note.className = 'ns';
+
     for (const f of [...recentFiles].reverse()) {
+      const row = document.createElement('div');
+      row.className = 'fr';
+
       const a = document.createElement('a');
+      a.className = 'dl';
       a.href = f.url;
       a.download = f.name;
       a.textContent = `⬇ ${f.name}　${mb(f.size)}`;
-      box.appendChild(a);
+      row.appendChild(a);
+
+      const file = shareableFile(f);
+      if (file) {
+        const b = document.createElement('button');
+        b.className = 'alt';
+        b.textContent = '📤 分享';
+        b.onclick = () => {
+          note.textContent = '';
+          // 点击本身就是用户手势，同步调用才算数
+          navigator.share({ files: [file] }).catch((e) => {
+            if (e && e.name === 'AbortError') return;   // 自己点了取消，不是错
+            note.textContent = `分享没成功：${(e && e.message) || e}。试试左边的 ⬇ 或右边的 ↗。`;
+          });
+        };
+        row.appendChild(b);
+      }
+
+      const o = document.createElement('a');
+      o.className = 'alt';
+      o.href = f.url;
+      o.target = '_blank';
+      o.rel = 'noopener';
+      o.textContent = '↗ 打开';
+      row.appendChild(o);
+
+      box.appendChild(row);
     }
+
+    const hint = document.createElement('div');
+    hint.className = 'rt hint';
+    hint.textContent =
+      '「↗ 打开」是最后的退路：它在新标签页里打开这个文件，存下来的文件名可能变成一串乱码，自己改回来就行。'
+      + '　上面这些都点了没反应＝这个浏览器不给下载（在微信/QQ 里打开的网页最常见，'
+      + '或者装了迅雷/IDM 这类下载器扩展）——换成手机自带的浏览器、或者用电脑重导一次最稳。';
+    box.appendChild(hint);
+    box.appendChild(note);
   }
 
   // ---------- 别让屏幕熄 ----------
@@ -282,7 +352,17 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    rememberFile(filename, url, blob.size);
+    rememberFile(filename, url, blob.size, blob);
+    // 🔴 2026-08-12 安卓用户报：「前几个角色都弹了下载，后面这几个就不弹了，
+    //    下载列表里只有最早那两个。」—— 这是浏览器的「自动下载多个文件」策略，
+    //    第一个是用户点「开始导出」带出来的、算手势，从第二个起就归它管了，
+    //    **而且拦得没有任何提示**。所以话要在这个当口说（事后说没用）。
+    if (downloadCount === 2) {
+      say('  ⚠️ 从第二个文件起，浏览器可能会问「是否允许下载多个文件」——**一定要点允许**。');
+      say('     如果它没问、而下载列表停在前一两个：就是被静默拦了（安卓上最常见）。');
+      say('     去浏览器的「网站设置 → 自动下载」把这个站设成允许，再导一次；');
+      say('     或者用面板底下那排「⬇ 手动保存」把已经做好的补存下来。');
+    }
   }
 
   // 安卓（和 Windows 上一些老编辑器）看 .md 时会**自己猜编码**，猜成 GBK 中文就全是乱码。
@@ -2021,9 +2101,22 @@ ${ncxpts.join('\n')}
   #mufyx-panel button:disabled{opacity:.45;cursor:default}
   #mufyx-recent{margin-top:10px;display:flex;flex-direction:column;gap:3px}
   #mufyx-recent .rt{font-size:11px;color:#9c93bd;margin-bottom:2px}
+  #mufyx-recent .hint{margin-top:4px;margin-bottom:0;line-height:1.5}
+  #mufyx-recent .ns{font-size:11px;color:#ffb3b3;line-height:1.5}
   #mufyx-recent a{font-size:11.5px;color:#cbbcff;text-decoration:none;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #mufyx-recent a:hover{text-decoration:underline;color:#e6dcff}
+  /* 一行＝一个文件的三条出路：⬇ 存 / 📤 分享 / ↗ 打开。
+     文件名那条吃掉剩余宽度并省略号，后两条不许被挤扁（flex:none）。 */
+  /* padding 是给手指的：不加的话这几个只有 16px 高，手机上按不准。
+     align-items:baseline 下加纵向 padding 不会错行。 */
+  #mufyx-recent .fr{display:flex;gap:9px;align-items:baseline}
+  #mufyx-recent .fr .dl{flex:1;min-width:0;padding:4px 0}
+  #mufyx-recent .fr .alt{flex:none;color:#a79ecb;padding:4px 0}
+  #mufyx-recent .fr .alt:hover{color:#e6dcff}
+  /* 面板里 button 默认是大按钮，这个得按链接来 —— 同 #mufyx-close 的写法 */
+  #mufyx-recent button.alt{background:none;border:none;width:auto;
+    font-size:11.5px;font-family:inherit;cursor:pointer}
   #mufyx-log{margin-top:12px;max-height:min(42vh,260px);overflow:auto;overscroll-behavior:contain;
     font-size:11.5px;line-height:1.5;
     color:#b8aed6;white-space:pre-wrap;border-top:1px solid rgba(190,170,255,.18);padding-top:8px}
