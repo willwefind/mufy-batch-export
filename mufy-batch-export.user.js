@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.40.0
+// @version      1.41.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.40.0';
+  const VERSION = '1.41.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -339,6 +339,9 @@
   };
 
   let downloadCount = 0; // 这一轮到底真的产出了几个文件
+  // 这一轮有没有撞上「卡取不到」的角色 —— 结尾那句话要跟着改，
+  // 否则会把人往「是不是会员过期了」那个错误方向带（真发生过）。
+  let sawCardMissing = false;
 
   function downloadBlob(filename, blob) {
     downloadCount += 1;
@@ -578,8 +581,125 @@
         lastSessionId: (d && d.lastSessionId) || '',
       };
     } catch (e) {
-      return { name: characterId.slice(0, 8), greeting: '', lastSessionId: '' };
+      // 🔴 这条退路以前是**完全沉默**的，而它其实是一个很重要的信号。
+      //    2026-08-14 实测：作者把卡设为私密之后，这个接口返回
+      //    **HTTP 500「Character not found」**，于是三件事一起发生：
+      //      ① 名字退化成 characterId 前八位（日志里那串 hex 就是这么来的）；
+      //      ② 🔴 `lastSessionId` 和卡在同一个返回里，**跟着一起没了** ——
+      //         而「聊过但从没存过档」的那一段，唯一的线索就是它；
+      //      ③ mufy 还会把这个角色从「聊过的角色」列表里摘掉（连网页上都打不开了）。
+      //    ⇒ 一个「没有存档、只有未存档段」的角色会变成「0 条存档 → 0 个待抓」，
+      //      而**正文其实一条没少**（拿旧的 sessionId 直接问 dialogs/query 照样全给）。
+      //    所以这里必须把 missing 标出来，让日志和产物照实说是「卡没了」，
+      //    而不是笼统的「没有可导出的对话」——后者会把人往会员/过期那个方向带。
+      return { name: characterId.slice(0, 8), greeting: '', lastSessionId: '', missing: true };
     }
+  }
+
+  // ---------- 救援：直接按 sessionId 抓 ----------
+  // 卡被作者设为私密（或删除）之后，能拿到 sessionId 的三条路会一起断掉：
+  // 角色列表里没有它、`characters/get` 500、没存过档的段也就无从列举。
+  // **但只要手里有 sessionId，`dialogs/query` 照样把正文全给你**（实测 7 段逐段条数不差）。
+  //
+  // sessionId 从哪来：mufy 的聊天页地址就是 `…?roleId=<角色ID>&sessionId=<对话ID>`，
+  // 所以**浏览器历史记录里那条地址**就是钥匙；以前导出过的人，
+  // 旧包的 `_原始数据.json` 里每段也都写着。
+  //
+  // ⚠️ 顺带把 `query_archives` 也问一遍：卡没了不代表存档也没了
+  // （实测 5 个消失的角色里有 2 个还剩 1 条存档），能多救一段是一段。
+  async function collectBySessions(characterId, wantSids, opts, report) {
+    const info = await getCharacter(characterId);
+    const name = info.name;
+    if (info.missing) {
+      report(`【${name}】卡在 mufy 那边取不到了（作者设为私密或删除），名字只能用 ID 前八位。`);
+    }
+
+    const bySession = new Map();
+    for (const sid of wantSids) {
+      if (sid && !bySession.has(sid)) bySession.set(sid, { sessionId: sid, archives: [], current: true });
+    }
+
+    // 存档那条路还通的话，顺手把它给的段也捞进来
+    let archives = [];
+    try {
+      archives = await getArchives(characterId);
+    } catch (e) {
+      report(`  （存档列表也读不到了：${e.message}）`);
+    }
+    let extra = 0;
+    for (const a of archives) {
+      const sid = a.sourceSessionId;
+      if (!sid) continue;
+      // 🔴 新建那一支起初写的是 `archives: []`，把这条存档本身丢了 ——
+      //    存档带着备注和日期，章节标题优先用备注、文件名用日期，丢了就退化成
+      //    「第 N 段」和抓取当天。离线看不出来，是在她账号上真跑一遍才露出来的。
+      if (!bySession.has(sid)) { bySession.set(sid, { sessionId: sid, archives: [a] }); extra += 1; }
+      else bySession.get(sid).archives = (bySession.get(sid).archives || []).concat([a]);
+    }
+    if (extra) report(`  存档列表里还找到 ${extra} 段你没填的，一起导了。`);
+
+    const list = [...bySession.values()];
+    report(`【${name}】救援模式：${list.length} 段待抓（你给了 ${wantSids.length} 个对话 ID）。`);
+
+    const sessions = [];
+    let i = 0;
+    for (const item of list) {
+      i += 1;
+      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…`);
+      const r = await getDialogs(item.sessionId, characterId);
+      if (!r.dialogs.length) {
+        report('  ⚠️ 这一段一条正文都没取到——对话 ID 填错了，或者这一段在 mufy 那边真的没了。');
+      }
+      if (r.incomplete) report(`  ⚠️ 不完整：${r.reason}`);
+      sessions.push({
+        sessionId: item.sessionId,
+        isCurrent: !!item.current,
+        fromArchiveOnly: false,
+        archives: (item.archives || []).map((a) => ({
+          archiveId: a.archiveId, remark: a.remark || '', createdAt: a.createdAt,
+        })),
+        error: r.incomplete ? r.reason : null,
+        incomplete: !!r.incomplete,
+        expectedCount: r.expected,
+        messageCount: r.dialogs.length,
+        earliest: r.earliest,
+        dialogs: r.dialogs,
+      });
+      await sleep(150);
+    }
+
+    const kept = sessions.filter((s) => s.messageCount > 0);
+    kept.sort((a, b) => (opts.oldestFirst ? sessionTime(a) - sessionTime(b) : sessionTime(b) - sessionTime(a)));
+
+    return {
+      characterId, name, greeting: '', archiveCount: archives.length, sessions: kept,
+      totalSessions: kept.length, batchFrom: 0,
+      noContent: kept.length === 0 && sessions.length > 0,
+      cardMissing: !!info.missing, rescued: true,
+      lastInteracted: null,
+      exportedAt: new Date().toISOString(),
+    };
+  }
+
+  // 把用户粘进来的东西解析成 [{ characterId, sessionIds }]。
+  // 🔴 只认地址里的 `roleId=` / `sessionId=`（或者手写成这个样子）——
+  //    光给两串裸 UUID 是**分不出谁是谁**的，而猜错了会去抓一个不存在的东西
+  //    然后报「一条都没取到」，把人引向错误的方向。宁可让它明确报错。
+  function parseRescueInput(text) {
+    const groups = new Map();
+    const lines = String(text || '').split(/[\n\r]+/).map((s) => s.trim()).filter(Boolean);
+    const bad = [];
+    for (const line of lines) {
+      const rid = (line.match(/roleId[=:]\s*([0-9a-fA-F-]{36})/) || [])[1];
+      const sid = (line.match(/sessionId[=:]\s*([0-9a-fA-F-]{36})/) || [])[1];
+      if (!rid) { bad.push(line.slice(0, 40)); continue; }
+      if (!groups.has(rid)) groups.set(rid, new Set());
+      if (sid) groups.get(rid).add(sid);
+    }
+    return {
+      groups: [...groups].map(([characterId, s]) => ({ characterId, sessionIds: [...s] })),
+      bad,
+    };
   }
 
   async function getArchives(characterId) {
@@ -1133,13 +1253,40 @@
   // lastInteracted 只在角色列表那条记录上有（`characters/get` 的 45 个字段里没有），
   // 所以要从调用方一路带下来。它是「聊过但一条都取不到」这种情况下唯一的旁证：
   // 有互动时间 ＝ 你确实跟这个角色互动过，不是从没点开过。
-  async function collectCharacter(characterId, opts, report, limit, liveSessionId, offset, lastInteracted) {
-    const { name, greeting, lastSessionId } = await getCharacter(characterId);
+  async function collectCharacter(characterId, opts, report, limit, liveSessionId, offset, lastInteracted, listName) {
+    const got = await getCharacter(characterId);
+    const { greeting, lastSessionId, missing } = got;
+    // 🔑 卡取不到时，**角色列表里那个名字还是好的**（2026-08-14 实测：被删卡的角色
+    //    `characters/get` 500，但它仍在 query_session 里、name 完好）。
+    //    以前一律退成 characterId 前八位，于是文件名平白变成一串 hex ——
+    //    有列表名就用列表名，没有才退 hex。
+    //    ⚠️ 撞名预扫算的就是 safeName(列表名)，这样两边用的是同一个字符串，
+    //    比以前更一致（v1.20 那个坑正是"判重比的不是最终生效的那个"）。
+    const name = (missing && listName) ? listName : got.name;
     // 🔴 列表那条路会把 lastSessionId 传进来；「手动填 ID」和「当前角色」不会。
     //    不补上的话，一个只有「聊过没保存」内容的角色，用手动 ID 去导会导出 0 段——
     //    而同一个角色走「全部聊过的角色」却是有内容的。README 又恰好教人
     //    「失败了用手动填 ID 补一遍」，不补这里那句话就是错的。
     if (!liveSessionId && lastSessionId) liveSessionId = lastSessionId;
+    // 卡取不到这件事必须当场说 —— 它是「名字怎么变成一串 hex」和
+    // 「为什么只导出了一部分」两个问题的共同答案，沉默着最坑人。
+    // 卡取不到这件事必须当场说 —— 但要分清两种情况，它们的后果完全不同
+    // （2026-08-14 实测）：
+    //   · **作者删了卡**：角色**仍在**「聊过的角色」列表里，名字和 lastSessionId 都还在
+    //     → 照常导得出来，连没存过档的段都在，只是没有开场白；
+    //   · **作者把卡设为私密**：mufy 把这个角色**从列表里摘掉**，于是拿不到 lastSessionId
+    //     → 没存过档的段够不着，得走救援那条路。
+    // 两种在 `characters/get` 上长得一模一样（都是 500），所以别硬说是哪一种。
+    if (missing) {
+      sawCardMissing = true;
+      report(`  ⚠️ 这个角色的卡在 mufy 那边取不到了（作者删了卡、或者把卡设为私密）。开场白拿不到了。`);
+      if (listName) {
+        report('     不过它还在你的「聊过的角色」列表里，名字和「最后一段」的线索都在，照常导。');
+      } else if (!liveSessionId) {
+        report('     🔴 顺带丢掉的还有「最后聊的那一段」的线索（它和卡在同一个返回里）——');
+        report('     所以**没存过档的段这条路够不着**。救法：用「救回卡已消失的角色」那一项。');
+      }
+    }
     report(`【${name}】读取存档列表…`);
     const archives = await getArchives(characterId);
 
@@ -1359,7 +1506,7 @@
     return {
       characterId, name, greeting, archiveCount: archives.length, sessions: kept,
       totalSessions, batchFrom: from, // 分批时给调用方判断还有没有下一批
-      noContent, lastInteracted: lastInteracted || null,
+      noContent, cardMissing: !!missing, lastInteracted: lastInteracted || null,
       exportedAt: new Date().toISOString(),
     };
   }
@@ -2053,6 +2200,22 @@ ${ncxpts.join('\n')}
               '- **里面也是空的** → 那边确实没有了，脚本变不出来\n' +
               '- **里面还看得到聊天内容** → 那就是我们的问题，请把角色名告诉我们\n'
             : '') +
+          // 卡取不到的角色，这句话必须进文件：文件名和标题都是一串 hex，
+          // 光看包本身完全不知道发生了什么，而日志一关就没了。
+          (pack.cardMissing
+            ? '\n---\n\n' +
+              '## ⚠️ 这个角色的卡在 mufy 那边取不到了\n\n' +
+              '（作者删了卡，或者把卡设为私密——这两种在接口上长得一样，分不出来。）' +
+              '所以**开场白拿不到了**；如果上面的名字是一串字母数字，也是因为这个。\n\n' +
+              (pack.rescued
+                ? '这个包是用「救回卡已消失的角色」导的 —— 内容按你给的对话 ID 抓，是全的。\n'
+                : '🔴 **更要紧的是**：卡一没，「最后聊的那一段」的线索也跟着没了' +
+                  '（它和卡在同一个返回里）。所以**没存过档的段，这条路够不着**——' +
+                  '这个包里只有存档列得出来的那些段。\n\n' +
+                  '**救法**：去浏览器的历史记录里翻出这个角色的聊天页地址' +
+                  '（形如 `?roleId=…&sessionId=…`），整条粘进面板的' +
+                  '「**救回卡已消失的角色**」那一项，就能把那些段整段导回来。\n')
+            : '') +
           (pack.sessions.some((s) => s.fromArchiveOnly)
             ? '\n---\n\n' +
               '## 🔴 有几段只拿到了存档摘要\n\n' +
@@ -2092,8 +2255,10 @@ ${ncxpts.join('\n')}
     font:13px/1.6 system-ui,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.55)}
   #mufyx-panel h3{margin:0 0 10px;font-size:14px;font-weight:600;letter-spacing:.04em}
   #mufyx-panel label{display:block;margin:8px 0}
-  #mufyx-panel select,#mufyx-panel input[type=text]{width:100%;padding:6px 8px;border-radius:8px;margin-top:4px;
+  #mufyx-panel select,#mufyx-panel input[type=text],#mufyx-panel textarea{width:100%;padding:6px 8px;border-radius:8px;margin-top:4px;
     background:rgba(255,255,255,.06);color:#e9e4f5;border:1px solid rgba(190,170,255,.25)}
+  /* 救援那个框要粘长地址：等宽、可换行、能拉高，box-sizing 别让 padding 把它撑出panel */
+  #mufyx-panel textarea{font:11.5px/1.5 ui-monospace,Consolas,monospace;resize:vertical;box-sizing:border-box}
   #mufyx-panel .row{display:flex;gap:8px;margin-top:12px}
   #mufyx-panel button{flex:1;padding:8px;border-radius:9px;cursor:pointer;font-size:13px;
     background:rgba(150,120,235,.28);color:#efeaff;border:1px solid rgba(190,170,255,.4)}
@@ -2196,6 +2361,7 @@ ${ncxpts.join('\n')}
           <option value="chatted">全部聊过的角色（慢）</option>
           <option value="followed">全部已关注角色（慢，含没聊过的）</option>
           <option value="manual">手动填角色 ID</option>
+          <option value="rescue">救回卡已消失的角色（粘聊天页地址）</option>
           <option value="masks">人设面具（全部，不是聊天记录）</option>
           <option value="cards">我创建的角色卡（全部）</option>
         </select>
@@ -2216,6 +2382,21 @@ ${ncxpts.join('\n')}
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
+      <label id="mufyx-sidwrap" style="display:none">把聊天页地址粘进来（一行一条，可以多条）
+        <textarea id="mufyx-sid" rows="3" placeholder="…/?roleId=xxxxxxxx-…&sessionId=xxxxxxxx-…"></textarea>
+      </label>
+      <div id="mufyx-sidtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        <b>作者把角色卡设为私密（或删掉）之后</b>，这个角色会从「聊过的角色」列表里消失，
+        连 mufy 网页上都打不开了 —— 但<b>聊天记录本身还在</b>，只是找不到门。<br>
+        门就在<b>浏览器的历史记录</b>里：那个角色的聊天页地址长成
+        <code>?roleId=…&amp;sessionId=…</code>，两把钥匙都在里面。<br>
+        按 <b>Ctrl+H</b>（手机看下面 README）打开历史，搜角色名或 mufy，
+        <b>把整条地址复制粘进来</b>，一行一条。以前导出过的人，
+        旧包 <code>_原始数据.json</code> 里每段也都写着 sessionId。<br>
+        ⚠️ 只认地址里的 <code>roleId=</code> / <code>sessionId=</code>：光给两串裸 ID
+        分不出谁是谁，猜错了只会白跑一趟。<br>
+        ⏳ <b>要趁早</b>：浏览器历史一般只留 90 天，清过历史 / 换过设备就没了。
+      </div>
       <label id="mufyx-chunkwrap">每包最多多少段对话（留空＝不分包）
         <input type="number" id="mufyx-chunk" min="1" step="1" placeholder="留空＝一个角色一个包">
       </label>
@@ -2269,11 +2450,16 @@ ${ncxpts.join('\n')}
       const epubOpt = shapeSel.querySelector('option[value=epub]');
 
       $('mufyx-idwrap').style.display = scope === 'manual' ? 'block' : 'none';
+      const rescue = scope === 'rescue';
+      $('mufyx-sidwrap').style.display = rescue ? 'block' : 'none';
+      $('mufyx-sidtip').style.display = rescue ? 'block' : 'none';
       // 只导一段时，「每包最多多少段」没有意义 —— 与其让它静静地不起作用，不如直接说
+      // 救援也一样：抓的是你点名的那几段，分包无从谈起。
       const liveOnly = scope === 'live';
       $('mufyx-livetip').style.display = liveOnly ? 'block' : 'none';
-      $('mufyx-chunk').disabled = liveOnly;
-      $('mufyx-chunk').placeholder = liveOnly ? '只导一段，用不上分包' : '留空＝一个角色一个包';
+      $('mufyx-chunk').disabled = liveOnly || rescue;
+      $('mufyx-chunk').placeholder = liveOnly ? '只导一段，用不上分包'
+        : rescue ? '救援模式抓的是你点名的段，用不上分包' : '留空＝一个角色一个包';
       // 「从第 N 个开始」只对成批跑的两个范围有意义（单个角色、面具、角色卡都不需要）
       const batch = scope === 'chatted' || scope === 'followed';
       $('mufyx-startwrap').style.display = batch ? 'block' : 'none';
@@ -2335,6 +2521,18 @@ ${ncxpts.join('\n')}
   function reportFinish(report) {
     if (downloadCount === 0) {
       report('⚠️ 这次没有产生任何文件。');
+      // 🔴 这句话以前不分情况都说「没有会员时过期存档看不到」——
+      //    而 2026-08-14 那位用户碰到的其实是「作者把卡设为私密了」，
+      //    于是这句话把她往会员/过期那个方向带了一圈。原因不同，说法就得不同。
+      if (sawCardMissing) {
+        report('   原因上面写了：**这个角色的卡在 mufy 那边取不到了**（作者设为私密或删除）。');
+        report('   卡一没，「最后聊的那一段」的线索也跟着没了（两者在同一个返回里），');
+        report('   而这个角色又没有存档可列 —— 于是一段都找不到。');
+        report('   🔑 **但正文很可能还在**：只要拿得到那一段的「对话 ID」就能整段导回来。');
+        report('   去浏览器的历史记录里翻出那个角色的聊天页地址（里面带 roleId 和 sessionId），');
+        report('   整条粘进范围里的「救回卡已消失的角色」那一项。');
+        return;
+      }
       report('   上面的日志会说明原因：常见是「没有可导出的对话」——');
       report('   没有会员时，过期的历史存档在 mufy 那边就看不到了，接口也不会返回，脚本拿不到。');
       return;
@@ -2398,6 +2596,7 @@ ${ncxpts.join('\n')}
     goBtn.disabled = true;
     lines.length = 0;
     downloadCount = 0;
+    sawCardMissing = false;
 
     // 导出期间别让屏幕熄。有安卓用户反馈「导全部角色时息屏几次之后就直接被踢出去了」——
     // 手机息屏/切后台之后系统会回收标签页，导出当场断。
@@ -2431,6 +2630,44 @@ ${ncxpts.join('\n')}
         opts.maskNote = maskShortfallNote(masks.length, got.total, got.truncated);
         if (opts.maskNote) report('🔴 ' + opts.maskNote);
         await emitMasks(masks, opts, stamp(), report);
+        reportFinish(report);
+        return;
+      }
+
+      // 救援：卡没了、角色从列表里消失了，只能靠用户手上的地址把门找回来。
+      // 这条路和下面那套「先拿一串 characterId 再逐个 collectCharacter」不一样
+      // （它根本列不出 session），所以单独走完就结束。
+      if (scope === 'rescue') {
+        const parsed = parseRescueInput($('mufyx-sid').value);
+        for (const b of parsed.bad) {
+          report(`⚠️ 这一行里没找到 roleId，跳过：${b}…`);
+        }
+        if (!parsed.groups.length) {
+          throw new Error('没解析出任何 roleId。请把聊天页的**整条地址**粘进来'
+            + '（形如 ?roleId=…&sessionId=…），一行一条。');
+        }
+        const noSid = parsed.groups.filter((g) => !g.sessionIds.length).length;
+        if (noSid) {
+          report(`⚠️ 有 ${noSid} 个角色只给了 roleId、没有 sessionId ——`);
+          report('   那就只能导它还列得出来的存档段，没存过档的段仍然够不着。');
+        }
+        report(`救援模式：${parsed.groups.length} 个角色，`
+          + `${parsed.groups.reduce((n, g) => n + g.sessionIds.length, 0)} 个对话 ID。`);
+        const ts2 = stamp();
+        let ok = 0;
+        for (const g of parsed.groups) {
+          try {
+            const pack = await collectBySessions(g.characterId, g.sessionIds, opts, report);
+            if (!pack.sessions.length) {
+              report(`  ⚠️ 【${pack.name}】一段都没抓到，不出文件。对话 ID 对吗？`);
+              continue;
+            }
+            if (await emit(pack, opts, ts2, report)) ok += 1;
+          } catch (e) {
+            report(`❌ 【${g.characterId.slice(0, 8)}】失败：${e.message}`);
+          }
+        }
+        report(`救援完成：${ok} 个角色出了文件。`);
         reportFinish(report);
         return;
       }
@@ -2514,7 +2751,7 @@ ${ncxpts.join('\n')}
             let from = 0, total = null, done = 0, msgs = 0, name = t.name || t.id;
             let lastPack = null;   // 一段都没导成时，可能还剩个开场白要留（见下面）
             for (;;) {
-              const pack = await collectCharacter(t.id, opts, report, opts.chunk, t.live, from, t.interacted);
+              const pack = await collectCharacter(t.id, opts, report, opts.chunk, t.live, from, t.interacted, t.name);
               name = pack.name;
               lastPack = pack;
               if (total === null) total = pack.totalSessions;
@@ -2548,7 +2785,7 @@ ${ncxpts.join('\n')}
               okCount += 1;
             }
           } else {
-          const pack = await collectCharacter(t.id, opts, report, null, t.live, 0, t.interacted);
+          const pack = await collectCharacter(t.id, opts, report, null, t.live, 0, t.interacted, t.name);
           // 🔴 一段对话都没有，不代表没东西可留：**角色卡自带的开场白也是记录**
           //    （实测有角色的开场白 2900 字，是完整的一幕场景）。
           //    以前这里只看 sessions.length 就跳过，把这类角色整个丢掉了 ——
@@ -2659,6 +2896,7 @@ ${ncxpts.join('\n')}
     getMasks, maskToMarkdown, emitMasks, maskTitle,
     getMyCards, cardToMarkdown, emitCards, cardRoles, cardAdversity, fetchCardImages,
     ensureToken, refreshToken, api, makeZip,
+    parseRescueInput, collectBySessions,   // 救援那条路，挂出来才验得了
     downloadBlob, renderRecent, recentFiles, setLogSink: (f) => { logSink = f; },
     contentToText, tidy, sessionToTavern,
     // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
