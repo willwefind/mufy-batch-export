@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.42.0
+// @version      1.43.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.42.0';
+  const VERSION = '1.43.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -610,8 +610,9 @@
   async function collectBySessions(characterId, wantSids, opts, report) {
     const info = await getCharacter(characterId);
     const name = info.name;
+    // 口径跟 collectCharacter 那边保持一致：删卡和私密在这个接口上分不出来，别硬说是哪一种
     if (info.missing) {
-      report(`【${name}】卡在 mufy 那边取不到了（作者设为私密或删除），名字只能用 ID 前八位。`);
+      report(`【${name}】卡取不到了（作者删了卡、或者把卡设为私密），所以名字只能用 ID 前八位、也没有开场白。`);
     }
 
     const bySession = new Map();
@@ -2398,11 +2399,13 @@ ${ncxpts.join('\n')}
       </label>
       <div id="mufyx-sidtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
         <b>作者把卡设为私密之后</b>，这个角色会从列表里消失、mufy 网页上也打不开 ——
-        但<b>记录还在</b>，只是找不到门。<br>
-        门＝<b>浏览器历史记录</b>里那条聊天页地址（<code>?roleId=…&amp;sessionId=…</code>）。
-        按 <b>Ctrl+H</b> 打开历史搜角色名，<b>整条地址复制粘进来</b>，一行一条。<br>
-        ⚠️ <b>必须带 <code>roleId=</code></b>：只给一串裸 ID 分不出谁是谁，会被跳过。<br>
-        ⏳ 历史一般只留 90 天。手机怎么翻、还有哪些找法，见 README「作者把角色卡设为私密」那节。
+        但<b>记录还在</b>，只是找不到门。门＝<b>浏览器历史记录</b>里那条聊天页地址。<br>
+        按 <b>Ctrl+H</b> 打开历史，<b>搜 <code>roleId</code></b>
+        （⚠️ <b>搜角色名是找不到的</b>：那些页面的标题全是站名，网址里也只有 ID），
+        然后<b>把地址整条复制粘进来，一行一条</b>。<br>
+        🔑 <b>分不清哪条是哪个角色？不用分</b> —— <b>一股脑全粘进来</b>，
+        脚本会先拉一遍角色列表，<b>还在的自动挑掉</b>，只救真正消失的。<br>
+        ⏳ 历史一般只留 90 天。手机怎么翻见 README「作者把角色卡设为私密」那节。
       </div>
       <label id="mufyx-chunkwrap">每包最多多少段对话（留空＝不分包）
         <input type="number" id="mufyx-chunk" min="1" step="1" placeholder="留空＝一个角色一个包">
@@ -2658,11 +2661,41 @@ ${ncxpts.join('\n')}
           report(`⚠️ 有 ${noSid} 个角色只给了 roleId、没有 sessionId ——`);
           report('   那就只能导它还列得出来的存档段，没存过档的段仍然够不着。');
         }
-        report(`救援模式：${parsed.groups.length} 个角色，`
-          + `${parsed.groups.reduce((n, g) => n + g.sessionIds.length, 0)} 个对话 ID。`);
+        // 🔴 2026-08-14 实测点破的一件事：**聊天页的标题是站名，
+        //    每一页都一样，网址里也只有两串 ID —— 没有任何地方带角色名。**
+        //    所以在浏览器历史里根本没法按角色名去找，也分不出哪一条是那个消失的角色。
+        //    ⇒ 别让人去分辨：让他把历史里的 mufy 聊天页地址**一股脑全粘进来**，
+        //      由脚本拉一遍「聊过的角色」列表，**还在列表里的自动挑掉**（那些没消失，
+        //      正常导出就能拿到），只救真正消失的那些。
+        report('先拉一遍「聊过的角色」列表，把还在的挑掉…');
+        const alive = new Map();
+        try {
+          for (const c of await getCharacterList(false)) {
+            if (c.characterId) alive.set(c.characterId, c.name || '');
+          }
+          report(`  列表里有 ${alive.size} 个角色。`);
+        } catch (e) {
+          report(`  （列表读不到：${e.message}——那就不挑了，你给的全都导。）`);
+        }
+        const skipped = [];
+        const todo = parsed.groups.filter((g) => {
+          if (!alive.size || !alive.has(g.characterId)) return true;
+          skipped.push(alive.get(g.characterId) || g.characterId.slice(0, 8));
+          return false;
+        });
+        if (skipped.length) {
+          report(`跳过 ${skipped.length} 个**还在列表里**的角色（它们没消失，用别的范围正常导就行）：`);
+          report('   ' + skipped.join('、'));
+        }
+        if (!todo.length) {
+          throw new Error('你给的这些角色**都还在「聊过的角色」列表里，没有需要救的**。'
+            + '想导它们请用「全部聊过的角色」或「手动填角色 ID」。');
+        }
+        report(`救援模式：${todo.length} 个消失的角色，`
+          + `${todo.reduce((n, g) => n + g.sessionIds.length, 0)} 个对话 ID。`);
         const ts2 = stamp();
         let ok = 0;
-        for (const g of parsed.groups) {
+        for (const g of todo) {
           try {
             const pack = await collectBySessions(g.characterId, g.sessionIds, opts, report);
             if (!pack.sessions.length) {
