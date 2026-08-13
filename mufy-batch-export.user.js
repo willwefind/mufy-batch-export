@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.41.0
+// @version      1.42.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.41.0';
+  const VERSION = '1.42.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -2250,9 +2250,16 @@ ${ncxpts.join('\n')}
     background:rgba(30,26,45,.92);color:#e9e4f5;border:1px solid rgba(190,170,255,.35);font:13px/1.4 system-ui,sans-serif;
     cursor:pointer;backdrop-filter:blur(8px);box-shadow:0 4px 18px rgba(0,0,0,.4)}
   #mufyx-btn:hover{border-color:rgba(190,170,255,.8)}
+  /* 🔴 高度上限以前**只写在窄屏那条媒体查询里**，桌面端完全没有 ——
+     面板是钉在 bottom 上往上长的，内容一多顶部就整个顶出屏幕外，
+     而 position:fixed 又没有滚动，于是**再也回不到上面**（v1.41 的救援说明一加就撞上了）。
+     现在两边都给上限＋自己滚。overscroll-behavior 防止滚到头继续带动整页。 */
   #mufyx-panel{position:fixed;left:16px;bottom:60px;z-index:2147483647;width:340px;padding:16px;border-radius:14px;
     background:rgba(24,20,38,.97);color:#e9e4f5;border:1px solid rgba(190,170,255,.28);
-    font:13px/1.6 system-ui,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.55)}
+    font:13px/1.6 system-ui,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.55);
+    /* ⚠️ box-sizing 不能省：默认 content-box 下 max-height 不含 padding+border，
+       32+2px 会从顶上顶出去（量出来 top:-18px），高度限了等于没限。 */
+    box-sizing:border-box;max-height:calc(100vh - 76px);overflow-y:auto;overscroll-behavior:contain}
   #mufyx-panel h3{margin:0 0 10px;font-size:14px;font-weight:600;letter-spacing:.04em}
   #mufyx-panel label{display:block;margin:8px 0}
   #mufyx-panel select,#mufyx-panel input[type=text],#mufyx-panel textarea{width:100%;padding:6px 8px;border-radius:8px;margin-top:4px;
@@ -2285,8 +2292,12 @@ ${ncxpts.join('\n')}
   #mufyx-log{margin-top:12px;max-height:min(42vh,260px);overflow:auto;overscroll-behavior:contain;
     font-size:11.5px;line-height:1.5;
     color:#b8aed6;white-space:pre-wrap;border-top:1px solid rgba(190,170,255,.18);padding-top:8px}
-  #mufyx-close{position:absolute;top:10px;right:12px;background:none;border:none;color:#9c93bd;cursor:pointer;
-    font-size:15px;padding:0;width:auto;flex:none}
+  /* 面板会滚了，所以 ✕ 不能再用 absolute —— 那样一往下滚它就跟着内容跑没了。
+     sticky 让它钉在可视区顶上；float 把它拉到右边不占一行。 */
+  #mufyx-close{position:sticky;top:-8px;float:right;margin:-6px -4px 0 0;
+    background:rgba(24,20,38,.92);border:none;color:#9c93bd;cursor:pointer;
+    font-size:15px;padding:2px 4px;width:auto;flex:none;z-index:2}
+  #mufyx-close:hover{color:#e9e4f5;background:rgba(24,20,38,.92)}
   /* 按钮右上角的收起小叉 */
   #mufyx-hide{position:fixed;z-index:2147483647;width:20px;height:20px;line-height:18px;text-align:center;
     border-radius:50%;background:rgba(20,17,30,.96);color:#c9c2e0;border:1px solid rgba(190,170,255,.45);
@@ -2386,16 +2397,12 @@ ${ncxpts.join('\n')}
         <textarea id="mufyx-sid" rows="3" placeholder="…/?roleId=xxxxxxxx-…&sessionId=xxxxxxxx-…"></textarea>
       </label>
       <div id="mufyx-sidtip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
-        <b>作者把角色卡设为私密（或删掉）之后</b>，这个角色会从「聊过的角色」列表里消失，
-        连 mufy 网页上都打不开了 —— 但<b>聊天记录本身还在</b>，只是找不到门。<br>
-        门就在<b>浏览器的历史记录</b>里：那个角色的聊天页地址长成
-        <code>?roleId=…&amp;sessionId=…</code>，两把钥匙都在里面。<br>
-        按 <b>Ctrl+H</b>（手机看下面 README）打开历史，搜角色名或 mufy，
-        <b>把整条地址复制粘进来</b>，一行一条。以前导出过的人，
-        旧包 <code>_原始数据.json</code> 里每段也都写着 sessionId。<br>
-        ⚠️ 只认地址里的 <code>roleId=</code> / <code>sessionId=</code>：光给两串裸 ID
-        分不出谁是谁，猜错了只会白跑一趟。<br>
-        ⏳ <b>要趁早</b>：浏览器历史一般只留 90 天，清过历史 / 换过设备就没了。
+        <b>作者把卡设为私密之后</b>，这个角色会从列表里消失、mufy 网页上也打不开 ——
+        但<b>记录还在</b>，只是找不到门。<br>
+        门＝<b>浏览器历史记录</b>里那条聊天页地址（<code>?roleId=…&amp;sessionId=…</code>）。
+        按 <b>Ctrl+H</b> 打开历史搜角色名，<b>整条地址复制粘进来</b>，一行一条。<br>
+        ⚠️ <b>必须带 <code>roleId=</code></b>：只给一串裸 ID 分不出谁是谁，会被跳过。<br>
+        ⏳ 历史一般只留 90 天。手机怎么翻、还有哪些找法，见 README「作者把角色卡设为私密」那节。
       </div>
       <label id="mufyx-chunkwrap">每包最多多少段对话（留空＝不分包）
         <input type="number" id="mufyx-chunk" min="1" step="1" placeholder="留空＝一个角色一个包">
