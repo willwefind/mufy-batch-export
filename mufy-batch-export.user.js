@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.43.0
+// @version      1.44.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.43.0';
+  const VERSION = '1.44.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -2435,6 +2435,12 @@ ${ncxpts.join('\n')}
         这一条导的不是对话，「清理 think」对它没有作用。
       </div>
       <div id="mufyx-shapetip" style="font-size:11.5px;color:#a79ecb;margin:2px 0 0"></div>
+      <label id="mufyx-nochatwrap" style="display:none"><input type="checkbox" id="mufyx-nochat"> 连没聊过的也导（只有开场白）</label>
+      <div id="mufyx-nochattip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        关注了但<b>从没聊过</b>的角色没有任何对话记录，但<b>开场白还在卡上</b>（常有一两千字）。
+        勾上会给它们各出一个只装开场白的包。<br>
+        ⏳ <b>卡还在才拿得到</b>——作者一旦删卡或设为私密，开场白也跟着没了。
+      </div>
       <label><input type="checkbox" id="mufyx-tidy" checked> 清理 think / 状态栏 HTML</label>
       <label><input type="checkbox" id="mufyx-json" checked> 附带 JSON 完整备份</label>
       <div class="row">
@@ -2474,6 +2480,10 @@ ${ncxpts.join('\n')}
       const batch = scope === 'chatted' || scope === 'followed';
       $('mufyx-startwrap').style.display = batch ? 'block' : 'none';
       $('mufyx-starttip').style.display = batch ? 'block' : 'none';
+      // 只有「全部已关注」里才可能混着从没聊过的（「全部聊过的角色」按定义都聊过）
+      const followed = scope === 'followed';
+      $('mufyx-nochatwrap').style.display = followed ? 'block' : 'none';
+      $('mufyx-nochattip').style.display = followed ? 'block' : 'none';
       // 分批只对聊天记录有意义（面具/角色卡不是按段组织的）
       $('mufyx-chunkwrap').style.display = other ? 'none' : 'block';
       $('mufyx-chunktip').style.display = other ? 'none' : 'block';
@@ -2727,9 +2737,19 @@ ${ncxpts.join('\n')}
         const chars = await getCharacterList(followedOnly);
 
         // 从没聊过的没有存档，跳掉；但要说清楚跳了多少，不做静默截断
-        const usable = chars.filter(hasChatted);
-        const skipped = chars.length - usable.length;
-        if (skipped) report(`${chars.length} 个里有 ${skipped} 个从没聊过（无存档），跳过。`);
+        // 「连没聊过的也导」：从没聊过的角色没有任何对话记录（lastSessionId 是空的、
+        // lastInteracted 是 0001-01-01 的零值），但**开场白还挂在卡上**——
+        // 她说过「开场白也是回忆」，而作者一旦删卡或设为私密，开场白也跟着没了。
+        // ⚠️ 默认仍然跳过：多数人只想要聊天记录，几十上百个空包是噪音。
+        const includeNever = followedOnly && $('mufyx-nochat').checked;
+        const usable = includeNever ? chars : chars.filter(hasChatted);
+        const never = chars.length - chars.filter(hasChatted).length;
+        if (never && includeNever) {
+          report(`${chars.length} 个里有 ${never} 个从没聊过 —— 按你的勾选，这些也导（里面只有开场白）。`);
+        } else if (never) {
+          report(`${chars.length} 个里有 ${never} 个从没聊过（无存档），跳过。`);
+          report('   想把它们的开场白也留下来，勾上「连没聊过的也导」再跑一次。');
+        }
 
         // 先数一遍撞名的，在文件名里补 characterId 前六位。
         // 🔴 **必须按「最终文件名」数，不能按原始角色名数**：
