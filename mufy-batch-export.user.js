@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.45.0
+// @version      1.46.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.45.0';
+  const VERSION = '1.46.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -646,7 +646,7 @@
     let i = 0;
     for (const item of list) {
       i += 1;
-      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…`);
+      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…${item.current ? '（你当前正在聊的对话，还没存档）' : ''}`);
       const r = await getDialogs(item.sessionId, characterId);
       if (!r.dialogs.length) {
         report('  ⚠️ 这一段一条正文都没取到——对话 ID 填错了，或者这一段在 mufy 那边真的没了。');
@@ -670,7 +670,7 @@
     }
 
     const kept = sessions.filter((s) => s.messageCount > 0);
-    kept.sort((a, b) => (opts.oldestFirst ? sessionTime(a) - sessionTime(b) : sessionTime(b) - sessionTime(a)));
+    kept.sort((a, b) => (opts.oldestFirst ? orderTime(a) - orderTime(b) : orderTime(b) - orderTime(a)));
 
     return {
       characterId, name, greeting: '', archiveCount: archives.length, sessions: kept,
@@ -1366,7 +1366,7 @@
     let acc = 0;              // 这一批已经攥在手里的正文字数
     for (const item of list) {
       i += 1;
-      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…`);
+      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…${item.current ? '（你当前正在聊的对话，还没存档）' : ''}`);
       const r = await getDialogs(item.sessionId, characterId);
       let dialogs = r.dialogs;
       let err = r.incomplete ? r.reason : null;
@@ -1509,7 +1509,7 @@
     }
 
     // 默认新的排前面（备份场景：查最近的最方便）；电子书那条路反过来，按时间正序
-    kept.sort((a, b) => (opts.oldestFirst ? sessionTime(a) - sessionTime(b) : sessionTime(b) - sessionTime(a)));
+    kept.sort((a, b) => (opts.oldestFirst ? orderTime(a) - orderTime(b) : orderTime(b) - orderTime(a)));
 
     // 🔴 「一段都没留下」有两种，性质完全不同，不许混为一谈：
     //    ① 从没点开过这个角色 —— 那连 session 都不会有，走不到这儿；
@@ -1541,6 +1541,21 @@
   }
 
   // 一段对话的代表时间：存档时间优先，否则用最后一条消息
+  // 排序专用的时间键。⚠️ 故意和 sessionTime 分开：文件名里的日期戳要用真实时间，
+  // 但**排序**必须把「当前正在聊的对话」当成最新的——
+  //   · 直觉上它就是「现在」；
+  //   · 🔴 真实用户撞过（2026-08-14）：最后一条消息停在 7/15，8/8 才补存了个档，
+  //     按「消息时间」排的话「8.8 存档」就插到了「当前对话」前面，
+  //     加上当前段标题又不明显，用户把它当成了一个**不存在的幽灵存档**；
+  //   · 抓取前的预排序（preTime）本来就把无存档段当 Infinity 排最前，
+  //     终排序不跟上，分批时「第 1-N 段」的边界和最终顺序就是两把尺子。
+  // 不用 Infinity 用 MAX_DATE：两个当前段（地址栏那段 + lastSessionId）相减要得 0，
+  // Infinity - Infinity 是 NaN，喂给 sort 行为未定义。
+  const MAX_DATE = 8640000000000000;
+  function orderTime(s) {
+    return s.isCurrent ? MAX_DATE : sessionTime(s).getTime();
+  }
+
   function sessionTime(s) {
     if (s.archives && s.archives.length) {
       const t = new Date(s.archives[0].createdAt);
@@ -2193,6 +2208,9 @@ ${ncxpts.join('\n')}
             // 一眼能看出「哪一段有问题」，不用一个个点开。这两条都是用户报过的症状：
             // 1KB 的存档摘要、以及同一份记录被导两遍。
             let mark = '';
+            // 🔵 当前对话那一段必须点名（2026-08-14 用户把它当成了「多出来的幽灵存档」）：
+            // 它不是存档，是「你正在聊、还没按保存」的那一段——按设计一并导出，免得漏掉结尾。
+            if (s.isCurrent) mark += '　🔵 你当前正在聊的对话（不是存档，还没按过保存）';
             if (s.fromArchiveOnly) mark += '　🔴 只有存档摘要（文件里有救法）';
             if (s.mergedFrom && s.mergedFrom.length) mark += `　🔁 已合并 ${s.mergedFrom.length} 段重复的`;
             // 长段（v1.35）：把「接口说多少 / 最早一条是哪天」写在目录里。

@@ -551,6 +551,9 @@ $('q').oninput = renderList;
 
 function capTitle(s, j) {
   if (s.isGreeting) return '开场白';
+  // 当前对话（未存档）没有备注，退到 AI 首行又常被日期正则削得只剩「/17:15」这种残句，
+  // 真有用户把它当成一个不存在的存档 —— 直接点名它是什么。
+  if (s.isCurrent) return `${j + 1}. 当前对话（未存档）`;
   const remark = (s.archives || []).map(a => a.remark).filter(Boolean).join(' / ');
   if (remark) return `${j + 1}. ${remark}`;
   const first = (s.dialogs || []).find(m => m.role === 'assistant' && tidy(contentToText(m.content)));
