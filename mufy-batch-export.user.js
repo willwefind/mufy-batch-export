@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.44.0
+// @version      1.45.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
 // @license      MIT
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.44.0';
+  const VERSION = '1.45.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -847,13 +847,30 @@
   //                 false → 有会话记录的，也就是你真聊过的。
   // ⚠️ 这两个集合并不互相包含：实测有 99 个关注了但从没聊过，
   //    也有 20 个聊过却没关注——所以「全部关注」并不等于「全部聊过」。
+  // 角色列表分页。
+  // 🔴 `pageSize` 上限是 **200**（2026-08-14 实测：填 500 直接 400，
+  //    接口原话 `Validation error: field 'PageSize' must be at most 200 characters`）。
+  //    以前写死 50，于是「60 页」这个防失控上限换算下来只有 **3000 个角色**——
+  //    有用户问到过这个数。提到 200 之后同样 60 页 = **12000**，
+  //    而且请求数直接降到四分之一（她 292 个关注：6 页 → 2 页）。
+  //    ⚠️ 换页大小会不会漏人是验过的：50 与 200 两遍拿到的角色数相同、
+  //    也与接口自报的 total 一致。
+  // 🔴 而且这个上限以前是**静默**的 —— 到顶就 break，一个字都不说。
+  //    面具那条路撞到同一个上限时会明确喊出来，这里却不会，**同一个仓里两套做法**。
+  //    静默截断是这个项目反复修的那类病，不能留。
+  const LIST_PAGE_SIZE = 200;
+  const LIST_MAX_PAGES = 60;          // 200 × 60 = 12000 个角色
+  let listTruncated = false;          // 撞到上限了没有，给调用方报出来
+
   async function getCharacterList(followedOnly) {
     const out = [];
     const seen = new Set();
     let page = 1;
+    listTruncated = false;
     for (;;) {
       const d = await api(
-        `/api/characters/query_session?pageNum=${page}&pageSize=50` + (followedOnly ? '&isFollowed=true' : '')
+        `/api/characters/query_session?pageNum=${page}&pageSize=${LIST_PAGE_SIZE}`
+        + (followedOnly ? '&isFollowed=true' : '')
       );
       const rows = (d && d.data) || [];
       for (const c of rows) {
@@ -861,7 +878,7 @@
       }
       if (!rows.length || d.hasNext === false) break;
       page += 1;
-      if (page > 60) break;
+      if (page > LIST_MAX_PAGES) { listTruncated = true; break; }
       await sleep(120);
     }
     return out;
@@ -2735,6 +2752,12 @@ ${ncxpts.join('\n')}
         const followedOnly = scope === 'followed';
         report(followedOnly ? '读取已关注角色列表…' : '读取聊过的角色列表…');
         const chars = await getCharacterList(followedOnly);
+        // 撞到分页上限必须当场喊 —— 少拿了却不说，等于骗人
+        if (listTruncated) {
+          report(`🔴 角色多到超过了脚本的分页上限（${LIST_MAX_PAGES} 页 × ${LIST_PAGE_SIZE} ＝ `
+            + `${LIST_MAX_PAGES * LIST_PAGE_SIZE} 个），**后面的角色这次没读到**。`);
+          report('   这是脚本自己的防失控上限，不是 mufy 的限制。请把这件事报给我们，我们把上限调高。');
+        }
 
         // 从没聊过的没有存档，跳掉；但要说清楚跳了多少，不做静默截断
         // 「连没聊过的也导」：从没聊过的角色没有任何对话记录（lastSessionId 是空的、
