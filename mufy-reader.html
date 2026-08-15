@@ -118,6 +118,41 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
 .ch .mk{flex:none;cursor:pointer;padding:2px 4px;border-radius:6px;font-size:12px;opacity:.8}
 .ch .mk:hover{opacity:1;background:rgba(232,169,78,.15)}
 .cap .mk{margin-right:3px;font-size:11px}
+/* ── 搜索 / 批注面板（右上角悬浮，一块面板两种内容） ── */
+#tp{position:fixed;top:60px;right:14px;z-index:30;width:min(340px,92vw);max-height:calc(100vh - 86px);
+    display:none;flex-direction:column;background:var(--panel);backdrop-filter:blur(14px);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 12px 44px rgba(0,0,0,.35)}
+#tp.on{display:flex}
+#tp header{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line)}
+#tp header .tt{flex:1;font-size:12.5px;color:var(--dim);letter-spacing:.06em}
+#tp header button{background:none;border:none;color:var(--faint);cursor:pointer;font-size:14px;padding:2px 4px}
+#tpq{margin:10px 12px 4px;padding:7px 10px;border-radius:9px;font-family:inherit;font-size:13px;
+     background:rgba(0,0,0,.14);color:var(--ink);border:1px solid var(--line);outline:none}
+#tpbody{overflow-y:auto;padding:8px 8px 14px}
+#tp .hit{padding:8px 10px;border-radius:9px;cursor:pointer;font-size:12.5px;color:var(--dim);line-height:1.6}
+#tp .hit:hover{background:rgba(232,169,78,.1);color:var(--ink)}
+#tp .hit .w{font-size:11px;color:var(--faint);letter-spacing:.04em}
+#tp .hit b{color:var(--glow);font-weight:600}
+#tp .hit .del{float:right;cursor:pointer;color:var(--faint);padding:0 4px}
+#tp .hit .del:hover{color:#c25b4a}
+#tp .none{padding:14px;color:var(--faint);font-size:12.5px;text-align:center;line-height:1.8}
+/* 划线：虚线下边＝只划线，实线＝带小注；点一下能看小注 */
+mark.hl{background:rgba(232,169,78,.26);color:inherit;border-bottom:1px dashed var(--glow);
+        border-radius:2px;padding:0 1px;cursor:pointer}
+mark.hl.noted{border-bottom-style:solid}
+.msg.flash{animation:hlflash 1.5s ease 2}
+@keyframes hlflash{0%,100%{background:transparent}35%{background:rgba(232,169,78,.15)}}
+#selbtn{position:fixed;z-index:40;display:none;padding:5px 12px;border-radius:999px;cursor:pointer;
+        background:var(--bg2);border:1px solid var(--glow);color:var(--glow);font-size:12.5px;font-family:inherit;
+        box-shadow:0 6px 22px rgba(0,0,0,.3)}
+#noteed{position:fixed;z-index:41;display:none;width:min(320px,90vw);padding:12px;border-radius:12px;
+        background:var(--bg2);border:1px solid var(--line);box-shadow:0 10px 40px rgba(0,0,0,.35)}
+#noteed textarea{width:100%;box-sizing:border-box;height:64px;resize:vertical;border-radius:8px;padding:7px 9px;
+        font-family:inherit;font-size:13px;background:rgba(0,0,0,.12);color:var(--ink);border:1px solid var(--line)}
+#noteed .row{display:flex;gap:8px;margin-top:9px}
+#noteed button{flex:1;padding:6px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12.5px;
+        background:rgba(232,169,78,.14);color:var(--ink);border:1px solid var(--line)}
+#noteed button:hover{background:rgba(232,169,78,.25)}
 .caps{padding:2px 0 8px 8px}
 .cap{padding:6px 10px 6px 16px;border-left:1px solid var(--line);margin-left:6px;
      font-size:12.8px;color:var(--faint);cursor:pointer;line-height:1.55}
@@ -250,6 +285,8 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
       <option value="rev">正文：倒过来</option>
     </select>
     <button id="markbtn" title="记住现在读到的段和页。之后在左侧角色名旁点 🔖 就能跳回来（每个角色记一个，重复存就覆盖）">🔖 存书签</button>
+    <button id="findbtn" title="在这个角色的全部段落里搜关键词，点结果直接跳过去">🔍 搜索</button>
+    <button id="notebtn" title="看这个角色的全部划线和小注，点一条跳回原文">📒 批注</button>
   </div>
 
   <div id="page"></div>
@@ -275,6 +312,14 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
   </div>
 </main>
 
+<div id="tp"><header><span class="tt"></span><button id="tpclose" title="关闭">✕</button></header>
+  <input id="tpq" placeholder="搜关键词，回车">
+  <div id="tpbody"></div></div>
+<button id="selbtn">🖍 标记这段</button>
+<div id="noteed">
+  <textarea id="notetxt" placeholder="写点小注（留空＝只划线）"></textarea>
+  <div class="row"><button id="notesave">保存</button><button id="notecancel">取消</button></div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -605,6 +650,10 @@ function capTitle(s, j) {
 }
 
 async function openChar(i, jump) {
+  // 离开上一个角色前，先把他读到哪结一笔账——
+  // #main 是 smooth 滚动，滚动是动画式的，一路触发 scroll 事件把防抖不停往后推，
+  // 用户滚完立刻切角色的话，那 400ms 可能永远没等到，等到时 S.cur 已经是新角色了。
+  saveProgress();
   const c = S.chars[i];
   $('title').textContent = c.name + ' · 读取中…';
   try {
@@ -643,20 +692,26 @@ async function openChar(i, jump) {
       toast('🔖 回到书签的位置');
       return;
     }
-    // 上次读到哪就回到哪 —— 这个位置一直在存，但以前没人读它，等于白存
-    let at = { cap: 0, page: 0 };
-    try {
-      const last = JSON.parse(localStorage.getItem('mufyReader.last') || '{}');
-      if (last.name === S.pack.name) {
-        const k = last.sid ? S.pack.sessions.findIndex(s => s.sessionId === last.sid) : -1;
-        if (k >= 0) at = { cap: k, page: last.page || 0 };
-        else if (Number.isInteger(last.cap) && last.cap >= 0 && last.cap < S.pack.sessions.length) {
-          at = { cap: last.cap, page: last.page || 0 };
+    // 每个角色各自记「读到哪」（进度 v2）。以前只有一条全局的——
+    // 开过别的角色就把上一个的位置顶掉了，「做了但没做好」指的就是这个。
+    // 现在按角色各存一份：段锚 sid + 第几页 + 页内滚动位置。书签是手动钉的，这个是自动跟的。
+    let at = { cap: 0, page: 0 }, resumed = false;
+    const prog = readJson(PROG_KEY)[charKey(c)];
+    if (prog && prog.sid) {
+      const k = S.pack.sessions.findIndex(s => s.sessionId === prog.sid);
+      if (k >= 0) { at = { cap: k, page: prog.page || 0 }; S._restore = prog.scroll || 0; resumed = true; }
+    }
+    if (!resumed) {
+      try {   // 老版本只存过一条全局的（mufyReader.last），迁移期先兜着
+        const last = JSON.parse(localStorage.getItem('mufyReader.last') || '{}');
+        if (last.name === S.pack.name) {
+          const k = last.sid ? S.pack.sessions.findIndex(s => s.sessionId === last.sid) : -1;
+          if (k >= 0) { at = { cap: k, page: last.page || 0 }; resumed = true; }
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
     openCap(at.cap, at.page);
-    if (at.cap || at.page) toast('回到上次读到的地方');
+    if (resumed && (at.cap || at.page || (prog && prog.scroll))) toast('回到上次读到的地方');
   } catch (err) {
     $('title').textContent = c.name;
     $('page').innerHTML = `<h2>打不开</h2><div class="meta">${esc(c.key || c.name)}</div>
@@ -726,13 +781,13 @@ function openCap(j, page) {
       + (dropped ? `　·　已藏 ${dropped} 行脚手架` : '')
       + `</div>`
   ];
-  for (const it of pages[S.page]) {
+  pages[S.page].forEach((it, k) => {
     const me = it.m.role === 'user';
     const t = it.m.createdTime ? new Date(it.m.createdTime).toLocaleString('zh-CN') : '';
-    parts.push(`<div class="msg ${me ? 'me' : 'ta'}">
+    parts.push(`<div class="msg ${me ? 'me' : 'ta'}" data-k="${k}">
       <div class="who">${me ? '我' : esc(p.name)}　${t}</div>
-      <div class="body">${esc(it.body)}</div></div>`);
-  }
+      <div class="body">${renderBody(it.body, s.sessionId)}</div></div>`);
+  });
   $('page').innerHTML = parts.join('');
 
   // 翻页按钮：本段还有页就翻页，翻到头了就滚到相邻的一段（像翻书那样连着）
@@ -763,9 +818,15 @@ function openCap(j, page) {
   }
 
   $('main').scrollTop = 0;
+  // 恢复上次的页内位置：恢复这一下要瞬时，别让 scroll-behavior:smooth 慢慢飘过去
+  if (S._restore != null) {
+    const m = $('main'), sb = m.style.scrollBehavior;
+    m.style.scrollBehavior = 'auto'; m.scrollTop = S._restore; m.style.scrollBehavior = sb;
+    S._restore = null;
+  }
   syncJumpers();
   renderList();
-  localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, sid: s.sessionId, cap: j, page: S.page }));
+  saveProgress();
 }
 
 function goPrev() {
@@ -855,6 +916,211 @@ function save() {
   } catch (e) {}
   bootFromCache();     // 有缓存就直接开，不用选文件
 })();
+
+/* ══ 搜索 · 批注 · 每角色进度 ══ */
+const NOTES_KEY = 'mufyReader.notes';
+const PROG_KEY = 'mufyReader.progress';
+function readJson(k) { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch (e) { return {}; } }
+function curKey() { return S.cur >= 0 ? charKey(S.chars[S.cur]) : null; }
+function notesFor(key) { return readJson(NOTES_KEY)[key] || []; }
+function saveNotes(key, arr) {
+  const all = readJson(NOTES_KEY);
+  if (arr.length) all[key] = arr; else delete all[key];
+  localStorage.setItem(NOTES_KEY, JSON.stringify(all));
+}
+
+/* 进度：每个角色各记一份（段锚 sid + 页 + 页内滚动），翻页时存、滚动也存（防抖）。 */
+function saveProgress() {
+  const key = curKey(); if (!key || !S.pack || S.cap < 0) return;
+  const all = readJson(PROG_KEY);
+  all[key] = { sid: S.pack.sessions[S.cap].sessionId, page: S.page,
+               scroll: Math.round($('main').scrollTop), ts: Date.now() };
+  localStorage.setItem(PROG_KEY, JSON.stringify(all));
+}
+let _progT = 0;
+$('main').addEventListener('scroll', () => { clearTimeout(_progT); _progT = setTimeout(saveProgress, 400); });
+// 关页面 / 切到后台时也结一笔账 —— 滚完立刻关页面的话，上面那 400ms 防抖来不及落盘。
+// （⚠️ 无头验证环境里 scroll 事件根本不派发（rAF 冻结那一族的坑），全靠这两条兜底才验得到。）
+addEventListener('beforeunload', saveProgress);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveProgress(); });
+
+/* 批注上色：先在**原文**上找位置、再分片转义 ——
+   不能先转义再找，转义会改字符下标；重叠的先到先得。 */
+function renderBody(body, sid) {
+  const key = curKey();
+  const ns = key ? notesFor(key).filter(x => x.sid === sid) : [];
+  if (!ns.length) return esc(body);
+  const spans = [];
+  for (const x of ns) {
+    const i = body.indexOf(x.text);
+    if (i < 0) continue;
+    if (spans.some(sp => i < sp.e && i + x.text.length > sp.s)) continue;
+    spans.push({ s: i, e: i + x.text.length, note: x.note || '', ts: x.ts });
+  }
+  if (!spans.length) return esc(body);
+  spans.sort((a, b) => a.s - b.s);
+  let out = '', pos = 0;
+  for (const sp of spans) {
+    out += esc(body.slice(pos, sp.s));
+    out += `<mark class="hl${sp.note ? ' noted' : ''}" data-ts="${sp.ts}">${esc(body.slice(sp.s, sp.e))}</mark>`;
+    pos = sp.e;
+  }
+  return out + esc(body.slice(pos));
+}
+// 点划线看小注（手机没有 hover，title 属性够不着）
+$('page').addEventListener('click', ev => {
+  const mk = ev.target.closest('mark.hl'); if (!mk) return;
+  const key = curKey(); if (!key) return;
+  const x = notesFor(key).find(nn => String(nn.ts) === mk.dataset.ts);
+  toast(x && x.note ? `📝 ${x.note}` : '这里划过线（没写小注）。想删就去「📒 批注」里删', 3000);
+});
+
+/* 把某一段在当前设置（分页长短、正倒序、藏脚手架）下摊平成 [{page,k,it}] ——
+   搜索和批注跳转共用，保证跳到的页码和你眼下看到的分页一致。 */
+function walkPages(j) {
+  const pages = paginate(prepCap(S.pack.sessions[j]).items);
+  const out = [];
+  pages.forEach((pg, pi) => pg.forEach((it, k) => out.push({ page: pi, k, it })));
+  return out;
+}
+function jumpFlash(j, page, k) {
+  openCap(j, page);
+  const el = document.querySelector(`#page .msg[data-k="${k}"]`);
+  if (el) {
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 3200);
+  }
+}
+
+/* ── 搜索：这一个角色的全部段落，含开场白 ── */
+function doSearch(q) {
+  const box = $('tpbody'); box.innerHTML = '';
+  q = String(q || '').trim();
+  if (!S.pack) { box.innerHTML = '<div class="none">先在左侧打开一个角色</div>'; return; }
+  if (!q) { box.innerHTML = '<div class="none">输入关键词，回车。搜的是这个角色的<b>所有段落</b></div>'; return; }
+  const ql = q.toLowerCase(), MAX = 300;
+  let hits = 0;
+  const head = document.createElement('div'); head.className = 'none';
+  box.appendChild(head);
+  outer:
+  for (let j = 0; j < S.pack.sessions.length; j++) {
+    for (const row of walkPages(j)) {
+      let from = 0;
+      const bl = row.it.body.toLowerCase();
+      // 一条消息里可能命中多处，都列出来（长消息里只报第一处会漏）
+      for (;;) {
+        const i = bl.indexOf(ql, from);
+        if (i < 0) break;
+        from = i + Math.max(1, q.length);
+        hits++;
+        const a = Math.max(0, i - 22);
+        const d = document.createElement('div');
+        d.className = 'hit';
+        d.innerHTML = `<div class="w">${esc(capTitle(S.pack.sessions[j], j))} · 第 ${row.page + 1} 页</div>`
+          + (a > 0 ? '…' : '') + esc(row.it.body.slice(a, i))
+          + '<b>' + esc(row.it.body.slice(i, i + q.length)) + '</b>'
+          + esc(row.it.body.slice(i + q.length, i + q.length + 42)) + '…';
+        const tgt = { j, page: row.page, k: row.k };
+        d.onclick = () => jumpFlash(tgt.j, tgt.page, tgt.k);
+        box.appendChild(d);
+        if (hits >= MAX) break outer;
+      }
+    }
+  }
+  head.innerHTML = hits
+    ? `找到 ${hits} 处${hits >= MAX ? '（太多了只列前 ' + MAX + ' 处，换个更具体的词）' : ''}`
+    : '没搜到。搜的是当前打开的这个角色（含所有段落和开场白）';
+}
+
+/* ── 批注列表 ── */
+function renderNotes() {
+  const box = $('tpbody'); box.innerHTML = '';
+  const key = curKey();
+  const ns = key ? notesFor(key) : [];
+  if (!ns.length) {
+    box.innerHTML = '<div class="none">还没有划线。<br>在正文里<b>划选一段字</b>，点冒出来的「🖍 标记这段」，<br>可以顺手写句小注（留空＝只划线）。</div>';
+    return;
+  }
+  for (const x of [...ns].sort((a, b) => b.ts - a.ts)) {
+    const j = S.pack ? S.pack.sessions.findIndex(s => s.sessionId === x.sid) : -1;
+    const d = document.createElement('div');
+    d.className = 'hit';
+    d.innerHTML = `<div class="w">${j >= 0 ? esc(capTitle(S.pack.sessions[j], j)) : '（这一段不在当前包里）'}`
+      + `<span class="del" title="删除这条">✕</span></div>`
+      + `<b>${esc(x.text.slice(0, 46))}${x.text.length > 46 ? '…' : ''}</b>`
+      + (x.note ? `<div>📝 ${esc(x.note)}</div>` : '');
+    d.querySelector('.del').onclick = ev => {
+      ev.stopPropagation();
+      saveNotes(key, notesFor(key).filter(nn => nn.ts !== x.ts));
+      renderNotes();
+      if (S.cap >= 0) openCap(S.cap, S.page);   // 让正文里的划线当场消失
+    };
+    d.onclick = () => {
+      if (j < 0) { toast('这一段不在当前打开的包里'); return; }
+      const row = walkPages(j).find(r => r.it.body.includes(x.text));
+      if (row) jumpFlash(j, row.page, row.k); else openCap(j, 0);
+    };
+    box.appendChild(d);
+  }
+}
+
+/* ── 面板开关（一块面板，两种内容） ── */
+function openPanel(mode) {
+  const tp = $('tp');
+  if (tp.classList.contains('on') && tp.dataset.mode === mode) { tp.classList.remove('on'); return; }
+  tp.dataset.mode = mode; tp.classList.add('on');
+  tp.querySelector('.tt').textContent = mode === 'find' ? '🔍 全文搜索 · 当前角色的所有段' : '📒 划线与小注 · 当前角色';
+  $('tpq').style.display = mode === 'find' ? '' : 'none';
+  if (mode === 'find') { doSearch($('tpq').value); $('tpq').focus(); }
+  else renderNotes();
+}
+$('findbtn').onclick = () => openPanel('find');
+$('notebtn').onclick = () => openPanel('notes');
+$('tpclose').onclick = () => $('tp').classList.remove('on');
+$('tpq').onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); doSearch($('tpq').value); } };
+
+/* ── 划选 → 标记 ── */
+let _selText = '';
+document.addEventListener('pointerup', () => {
+  // 等 30ms 让选区定型（手机上尤其）；点按钮本身触发的 pointerup 会把按钮藏掉，
+  // 但 click 在 pointerup 之后、这个 30ms 之前就已经执行了，不受影响。
+  setTimeout(() => {
+    const sel = document.getSelection();
+    const txt = sel && sel.rangeCount ? String(sel).trim() : '';
+    if (!txt || txt.length < 2 || S.cap < 0 || !$('page').contains(sel.anchorNode)) {
+      $('selbtn').style.display = 'none'; return;
+    }
+    _selText = txt.slice(0, 300);
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    const b = $('selbtn');
+    b.style.display = 'block';
+    b.style.left = Math.min(window.innerWidth - 140, Math.max(8, r.left + r.width / 2 - 55)) + 'px';
+    b.style.top = Math.max(8, r.top - 42) + 'px';
+  }, 30);
+});
+$('selbtn').onclick = () => {
+  const b = $('selbtn'); b.style.display = 'none';
+  const ed = $('noteed');
+  ed.style.left = b.style.left; ed.style.top = b.style.top;
+  ed.style.display = 'block';
+  $('notetxt').value = '';
+  $('notetxt').focus();
+};
+$('notecancel').onclick = () => { $('noteed').style.display = 'none'; };
+$('notesave').onclick = () => {
+  $('noteed').style.display = 'none';
+  const key = curKey(); if (!key || S.cap < 0 || !_selText) return;
+  // 只认落在**单条消息**里的选区：跨多条的锚不稳（各条正文里都找不到整段），宁可请人分两次划
+  const ok = prepCap(S.pack.sessions[S.cap]).items.some(it => it.body.includes(_selText));
+  if (!ok) { toast('这段话跨了多条消息，请在一条消息之内划选', 2800); return; }
+  const arr = notesFor(key);
+  arr.push({ sid: S.pack.sessions[S.cap].sessionId, text: _selText,
+             note: $('notetxt').value.trim().slice(0, 500), ts: Date.now() });
+  saveNotes(key, arr);
+  openCap(S.cap, S.page);   // 重画，让划线当场长出来
+  toast('🖍 已标记' + ($('notetxt').value.trim() ? '，小注也存了' : ''));
+};
 
 /* 🔴 2026-08-10 改：这里原来写着「这个阅读器是给电脑用的」——**是我们在说反话**。
    实测（安卓用户 2026-08-10）：「选择文件夹」在手机上其实也点得动，
