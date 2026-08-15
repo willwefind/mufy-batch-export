@@ -114,6 +114,10 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
 .ch:hover{background:rgba(232,169,78,.08);color:var(--ink)}
 .ch.on{background:rgba(232,169,78,.13);color:var(--glow)}
 .ch .n{font-size:11px;color:var(--faint);flex:none}
+/* 书签小旗：挂在角色名旁边，点了直接跳回存的位置。padding 是给手指的 */
+.ch .mk{flex:none;cursor:pointer;padding:2px 4px;border-radius:6px;font-size:12px;opacity:.8}
+.ch .mk:hover{opacity:1;background:rgba(232,169,78,.15)}
+.cap .mk{margin-right:3px;font-size:11px}
 .caps{padding:2px 0 8px 8px}
 .cap{padding:6px 10px 6px 16px;border-left:1px solid var(--line);margin-left:6px;
      font-size:12.8px;color:var(--faint);cursor:pointer;line-height:1.55}
@@ -237,6 +241,15 @@ body{background:var(--bg);color:var(--ink);font-family:var(--serif);
     </select>
     <button id="hideme" title="RP 记录里你的发言常常是指令，藏起来更像读小说">隐藏我的发言</button>
     <button id="hidesys" title="记忆区的「规则：…」「AI填充：…」是给模型看的脚手架，不是正文">已藏脚手架</button>
+    <select id="capord" title="左侧目录里段的排列顺序。ZIP 导出默认最近的段在最上面，想从头读起就倒过来">
+      <option value="exp">目录：照导出顺序</option>
+      <option value="rev">目录：倒过来</option>
+    </select>
+    <select id="msgord" title="一段之内消息的顺序。导出默认从早到晚（像读小说）；倒过来就是最新的在最前">
+      <option value="exp">正文：从早到晚</option>
+      <option value="rev">正文：倒过来</option>
+    </select>
+    <button id="markbtn" title="记住现在读到的段和页。之后在左侧角色名旁点 🔖 就能跳回来（每个角色记一个，重复存就覆盖）">🔖 存书签</button>
   </div>
 
   <div id="page"></div>
@@ -522,16 +535,41 @@ async function bootFromCache() {
 $('dir').onchange = e => accept(e.target.files);
 $('zips').onchange = e => accept(e.target.files);
 
+/* ── 书签 ──
+   每个角色记一个（重复存就覆盖）。锚点用 sessionId 而不是段的下标：
+   目录可以倒序、导出可以重来，下标会漂，sessionId 不会。 */
+const MARKS_KEY = 'mufyReader.marks';
+function readMarks() { try { return JSON.parse(localStorage.getItem(MARKS_KEY) || '{}') || {}; } catch (e) { return {}; } }
+function charKey(c) { return c.name + (c.id ? '#' + c.id : ''); }
+
+/* 目录顺序：'exp' = 照导出（ZIP 默认最近的段在上面），'rev' = 倒过来（从头读起）。
+   开场白（第 0 章）永远钉在最上面，倒的只是真正的对话段。
+   直接把 sessions 数组就地重排：openCap／翻页／编号全按下标走，重排一处、处处生效。 */
+function applyCapOrder(pack, want) {
+  const cur = pack.__ord || 'exp';
+  if (cur === want) return;
+  const pin = (pack.sessions[0] && pack.sessions[0].isGreeting) ? 1 : 0;
+  pack.sessions = pack.sessions.slice(0, pin).concat(pack.sessions.slice(pin).reverse());
+  pack.__ord = want;
+}
+
 function renderList() {
   const kw = $('q').value.trim().toLowerCase();
+  const marks = readMarks();
   const box = $('list'); box.innerHTML = '';
   S.chars.forEach((c, i) => {
     if (kw && !c.name.toLowerCase().includes(kw)) return;
+    const mk = marks[charKey(c)];
     const d = document.createElement('div');
     d.className = 'ch' + (i === S.cur ? ' on' : '');
-    d.innerHTML = `<span>${esc(c.name)}${c.id ? ` <span class="n">#${c.id}</span>` : ''}</span>
-                   <span class="n">${(((c.file && c.file.size) || c.size || 0) / 1048576).toFixed(1)}M</span>`;
+    d.innerHTML = `<span>${esc(c.name)}${c.id ? ` <span class="n">#${c.id}</span>` : ''}</span>`
+      + (mk ? `<span class="mk" title="跳回书签：${esc(mk.title || '')} · 第 ${(mk.page || 0) + 1} 页">🔖</span>` : '')
+      + `<span class="n">${(((c.file && c.file.size) || c.size || 0) / 1048576).toFixed(1)}M</span>`;
     d.onclick = () => openChar(i);
+    if (mk) {
+      // 点小旗＝直接跳到书签的位置；点行其余部分＝照常打开（各走各的，别互相触发）
+      d.querySelector('.mk').onclick = ev => { ev.stopPropagation(); openChar(i, mk); };
+    }
     box.appendChild(d);
     if (i === S.cur && S.pack) {
       const caps = document.createElement('div');
@@ -539,7 +577,8 @@ function renderList() {
       S.pack.sessions.forEach((s, j) => {
         const el = document.createElement('div');
         el.className = 'cap' + (j === S.cap ? ' on' : '');
-        el.innerHTML = `${esc(capTitle(s, j))}<span class="m">${s.messageCount}条</span>`;
+        el.innerHTML = `${mk && mk.sid === s.sessionId ? '<span class="mk">🔖</span>' : ''}`
+          + `${esc(capTitle(s, j))}<span class="m">${s.messageCount}条</span>`;
         el.onclick = ev => { ev.stopPropagation(); openCap(j); };
         caps.appendChild(el);
       });
@@ -565,7 +604,7 @@ function capTitle(s, j) {
   return `${j + 1}. 第 ${j + 1} 段`;
 }
 
-async function openChar(i) {
+async function openChar(i, jump) {
   const c = S.chars[i];
   $('title').textContent = c.name + ' · 读取中…';
   try {
@@ -593,14 +632,27 @@ async function openChar(i) {
       });
     }
     S.cur = i; S.cap = -1;
+    applyCapOrder(S.pack, $('capord').value);
     renderList();
+    // 带着书签来的：按 sessionId 找它现在排第几（目录倒过序、重导过都不怕），
+    // 找不到（重导后那段没了）就退回存下的下标。
+    if (jump) {
+      const k = S.pack.sessions.findIndex(s => s.sessionId === jump.sid);
+      const cap = k >= 0 ? k : Math.max(0, Math.min(jump.cap || 0, S.pack.sessions.length - 1));
+      openCap(cap, jump.page || 0);
+      toast('🔖 回到书签的位置');
+      return;
+    }
     // 上次读到哪就回到哪 —— 这个位置一直在存，但以前没人读它，等于白存
     let at = { cap: 0, page: 0 };
     try {
       const last = JSON.parse(localStorage.getItem('mufyReader.last') || '{}');
-      if (last.name === S.pack.name && Number.isInteger(last.cap)
-          && last.cap >= 0 && last.cap < S.pack.sessions.length) {
-        at = { cap: last.cap, page: last.page || 0 };
+      if (last.name === S.pack.name) {
+        const k = last.sid ? S.pack.sessions.findIndex(s => s.sessionId === last.sid) : -1;
+        if (k >= 0) at = { cap: k, page: last.page || 0 };
+        else if (Number.isInteger(last.cap) && last.cap >= 0 && last.cap < S.pack.sessions.length) {
+          at = { cap: last.cap, page: last.page || 0 };
+        }
       }
     } catch (e) {}
     openCap(at.cap, at.page);
@@ -629,6 +681,9 @@ function prepCap(s) {
     if (!body) continue;
     items.push({ m, body });
   }
+  // 正文顺序开关：倒过来＝最新的消息排最前。在这里翻而不是在渲染时翻，
+  // 分页、跳页、上一页/下一页全都自动跟着走，不用各处再判一次。
+  if ($('msgord') && $('msgord').value === 'rev') items.reverse();
   return { items, dropped };
 }
 
@@ -710,7 +765,7 @@ function openCap(j, page) {
   $('main').scrollTop = 0;
   syncJumpers();
   renderList();
-  localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, cap: j, page: S.page }));
+  localStorage.setItem('mufyReader.last', JSON.stringify({ name: p.name, sid: s.sessionId, cap: j, page: S.page }));
 }
 
 function goPrev() {
@@ -750,6 +805,27 @@ $('hidesys').onclick = () => {
 };
 // 分页 / 滚动 切换：留在原来那一段，回到第一页
 $('pg').onchange = e => { S.mode = e.target.value; save(); if (S.cap >= 0) openCap(S.cap, 0); };
+// 目录倒序：就地重排后**留在正在读的那一段**（按 sessionId 找它的新位置），页码不动
+$('capord').onchange = () => {
+  save();
+  if (!S.pack) return;
+  const sid = S.cap >= 0 ? S.pack.sessions[S.cap].sessionId : null;
+  applyCapOrder(S.pack, $('capord').value);
+  const k = sid ? S.pack.sessions.findIndex(s => s.sessionId === sid) : -1;
+  if (k >= 0) openCap(k, S.page); else renderList();
+};
+// 正文倒序：整段重新分页，回到（新顺序的）第一页
+$('msgord').onchange = () => { save(); if (S.cap >= 0) openCap(S.cap, 0); };
+$('markbtn').onclick = () => {
+  if (S.cur < 0 || S.cap < 0 || !S.pack) { toast('先打开一段对话，再存书签'); return; }
+  const s = S.pack.sessions[S.cap];
+  const marks = readMarks();
+  const title = capTitle(s, S.cap).replace(/^\d+\.\s*/, '');
+  marks[charKey(S.chars[S.cur])] = { sid: s.sessionId, cap: S.cap, page: S.page, title, ts: Date.now() };
+  localStorage.setItem(MARKS_KEY, JSON.stringify(marks));
+  toast(`🔖 已存书签：${title} · 第 ${S.page + 1} 页`);
+  renderList();
+};
 $('ps').onchange = () => { save(); if (S.cap >= 0) openCap(S.cap, 0); };
 $('toggle').onclick = () => $('side').classList.toggle('hide');
 
@@ -758,7 +834,8 @@ function save() {
     fs, lh: $('lh').value, cw: $('cw').value, ff: $('ff').value,
     th: $('th').value, hideme: root.dataset.hideme || '',
     hidesys: root.dataset.hidesys || '1',
-    pg: $('pg').value, ps: $('ps').value
+    pg: $('pg').value, ps: $('ps').value,
+    capord: $('capord').value, msgord: $('msgord').value
   }));
 }
 (function load() {
@@ -773,6 +850,8 @@ function save() {
     if (p.hidesys === '0') { root.dataset.hidesys = '0'; $('hidesys').textContent = '显示脚手架'; }
     if (p.pg) { $('pg').value = p.pg; S.mode = p.pg; }
     if (p.ps) { $('ps').value = p.ps; }
+    if (p.capord) { $('capord').value = p.capord; }
+    if (p.msgord) { $('msgord').value = p.msgord; }
   } catch (e) {}
   bootFromCache();     // 有缓存就直接开，不用选文件
 })();
