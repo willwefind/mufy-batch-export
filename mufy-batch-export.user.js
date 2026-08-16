@@ -4,7 +4,7 @@
 // @version      1.46.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
 // @author       Ciel
-// @license      MIT
+// @license      AGPL-3.0-only
 // @homepageURL  https://github.com/willwefind/mufy-batch-export
 // @supportURL   https://github.com/willwefind/mufy-batch-export/issues
 // @downloadURL  https://raw.githubusercontent.com/willwefind/mufy-batch-export/main/mufy-batch-export.user.js

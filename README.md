@@ -1998,4 +1998,4 @@ EPUB 说到底就是一个结构固定的 ZIP，所以 v1.10 把整套生成逻�
 
 ## License
 
-MIT。随便改随便传。
+GNU Affero General Public License v3.0（AGPL-3.0）。详见 [`LICENSE`](LICENSE)。
