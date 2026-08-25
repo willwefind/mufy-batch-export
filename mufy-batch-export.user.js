@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.48.0
+// @version      1.49.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来；还能给全部角色做一次「体检」，一次性查出哪些卡没了、哪些记录空了
 // @author       Ciel
 // @license      AGPL-3.0-only
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.48.0';
+  const VERSION = '1.49.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -1190,14 +1190,45 @@
     }
 
     // clover 最初要的就是这一栏：聊过、记录没了、还没收藏 —— 最容易被自己忘掉的一批
-    const target = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
-    if (target.length) {
-      L.push(`── 🎯 未收藏 ＋ 一条记录都不剩（${target.length} 个）──`);
-      L.push('  这批最容易被忘掉：你聊过它，但没收藏，现在记录也不剩了。');
-      L.push('  收藏并不会把记录变回来，只是让你以后还找得到它。');
+    // 🔑 clover 最初问的是**两件事**：
+    //   ① 我聊过的角色，有没有被我收藏
+    //   ② 我收藏的角色，有没有失效
+    // ② 被上面那几个桶覆盖了（🔒 卡没了 / 💬 记录不剩），甚至比她问的更细。
+    // 但 ① 一度只剩「每一行标个 ⭐/○」—— 几百行里自己去挑，等于没做。
+    // 所以下面这一栏必须**单列出来**，它才是她原话的前半句。
+    //
+    // 🔴 这两栏都靠 r.followed，而「只查聊过的」那个范围**根本不会去读「已关注」列表**，
+    //    那时候所有人的 followed 都是 false —— 不守住的话，两栏会把**全部角色**
+    //    当成"你没收藏过"列出来。那是实打实的谎报，比不报更糟。
+    if (meta.followKnown === false) {
+      L.push('── 关于「哪些还没收藏」──');
+      L.push('  这次没读「已关注」列表，所以判断不了哪些收藏过、哪些没有 —— 就不猜了。');
+      L.push('  想要那份名单：把面板上的「体检哪些角色」换成「收藏的 ＋ 聊过的」再跑一次。');
       L.push('');
-      for (const r of target) L.push(`  ○ ${r.name}　${r.characterId}`);
-      L.push('');
+    } else {
+      // 还来得及的那一批：卡在、记录在，只差你去收藏
+      const 还来得及 = rows.filter((r) => bucketOf(r) === 'ok' && !r.followed);
+      if (还来得及.length) {
+        L.push(`── 💛 聊过了，但还没收藏（${还来得及.length} 个）──`);
+        L.push('  卡还在、记录也还在，只是你没收藏过它 —— 现在去收藏还来得及。');
+        L.push('  ⚠️ 收藏不会让记录不丢。但它是**唯一**能替你记住"这里原来有东西"的地方：');
+        L.push('     角色一旦下架、或者被作者设为私密，它会从「已关注」和「聊过的」两份列表里');
+        L.push('     一起消失，什么痕迹都不剩 —— **只有收藏夹的计数还记着它存在过**。');
+        L.push('     （本工具就是靠这个差额，才数得出一个夹里已经没了几个角色。）');
+        L.push('');
+        for (const r of 还来得及) L.push(`  ○ ${r.name}　${r.characterId}`);
+        L.push('');
+      }
+      // 已经晚了的那一批
+      const target = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
+      if (target.length) {
+        L.push(`── 🎯 未收藏 ＋ 一条记录都不剩（${target.length} 个）──`);
+        L.push('  这批已经晚了：你聊过它，没收藏，现在记录也不剩了。');
+        L.push('  收藏并不会把记录变回来 —— 上面那栏 💛 才是还来得及的。');
+        L.push('');
+        for (const r of target) L.push(`  ○ ${r.name}　${r.characterId}`);
+        L.push('');
+      }
     }
 
     L.push('── 这份报告是怎么判的 ──');
@@ -2904,8 +2935,9 @@ ${ncxpts.join('\n')}
         官方「引继码」XML 把小剧场和全局美化加密了，这里是明文。
       </div>
       <div id="mufyx-checktip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
-        <b>只查状态、不导内容。</b>一次性告诉你：哪些角色的卡被作者删了、哪些的记录一条都不剩了、
-        哪些是关注了但从没聊过。跑完出一份 TXT 报告（勾了下面的 JSON 就再多一份机读的 .json）。<br>
+        <b>只查状态、不导内容。</b>一次性告诉你两件事：<b>①「我聊过的角色，哪些还没收藏」</b>、
+        <b>②「我收藏的角色，哪些已经失效了」</b>（卡被作者删了 / 记录一条不剩 / 关注了从没聊过）。
+        跑完出一份 TXT 报告（勾了下面的 JSON 就再多一份机读的 .json）。<br>
         全程<b>只读</b>——不会改动、删除、取关任何东西。<br>
         ⚠️ <b>被作者设为私密的角色查不到</b>：mufy 把它从列表里整个摘掉了，脚本枚举不到。
         那种要用范围里的「救回卡已消失的角色」，报告开头也会再说一遍。
@@ -3604,7 +3636,9 @@ ${ncxpts.join('\n')}
           + '数字可能会变回来。');
         notes.push('体检全程只读：没有改动、删除、取关任何东西。');
 
-        const text = buildCheckReport(rows, { scopeLabel, folderLabel, notes });
+        // 只查聊过的时候没读「已关注」列表 —— 收藏状态是不知道的，别让报告去猜
+        const followKnown = cs !== 'chatted';
+        const text = buildCheckReport(rows, { scopeLabel, folderLabel, notes, followKnown });
         const ts3 = stamp();
         download(`mufy_体检_${ts3}.txt`, text);
         if (opts.json) {
@@ -3613,6 +3647,7 @@ ${ncxpts.join('\n')}
             exportTime: new Date().toISOString(),
             scope: cs,
             scopeLabel,
+            followKnown,
             folder: folderLabel || '全部',
             notes,
             rows,
@@ -3625,8 +3660,14 @@ ${ncxpts.join('\n')}
           const cnt = rows.filter((r) => bucketOf(r) === key).length;
           if (cnt) report(`${icon} ${label}：${cnt}`);
         }
-        const tgt = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
-        if (tgt.length) report(`🎯 其中「未收藏 ＋ 一条记录都不剩」的有 ${tgt.length} 个，报告里列了名单。`);
+        if (followKnown) {
+          const 来得及 = rows.filter((r) => bucketOf(r) === 'ok' && !r.followed);
+          if (来得及.length) report(`💛 有 ${来得及.length} 个「聊过了但还没收藏」——卡和记录都还在，报告里列了名单。`);
+          const tgt = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
+          if (tgt.length) report(`🎯 其中「未收藏 ＋ 一条记录都不剩」的有 ${tgt.length} 个，已经晚了。`);
+        } else {
+          report('（这次没读「已关注」列表，所以判断不了哪些没收藏。想看就换成「收藏的 ＋ 聊过的」。）');
+        }
         report('⚠️ 被作者设为私密的角色查不到（mufy 把它从列表里摘掉了）——报告开头写了怎么救。');
         reportFinish(report);
         return;
