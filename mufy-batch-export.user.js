@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.46.0
-// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来
+// @version      1.48.0
+// @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来；还能给全部角色做一次「体检」，一次性查出哪些卡没了、哪些记录空了
 // @author       Ciel
 // @license      AGPL-3.0-only
 // @homepageURL  https://github.com/willwefind/mufy-batch-export
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.46.0';
+  const VERSION = '1.48.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -82,8 +82,11 @@
 
   // 401 → 换 token 重来；5xx / 429 / 断网 → 退避重试（真遇到过 503）
   // 传了 body 就走 POST（面具接口只认 POST，聊天那几个接口都是 GET）
-  async function api(path, body) {
-    const MAX = 4;
+  // tries：调用方可以压低重试次数。默认 4 次是给「导出」那条路的——它宁可多等也别少拿。
+  // 但**探测**类的请求不一样：被删掉的卡是每次都 500（那是接口的答复，不是抖动），
+  // 默认那套退避会为每一个被删的角色白等 7 秒，几百个角色的体检里这笔账很可观。
+  async function api(path, body, tries) {
+    const MAX = tries || 4;
     let last = '';
     for (let i = 0; i < MAX; i++) {
       const t = await ensureToken();
@@ -371,10 +374,11 @@
   // 安卓（和 Windows 上一些老编辑器）看 .md 时会**自己猜编码**，猜成 GBK 中文就全是乱码。
   // 猜得准不准跟文件内容有关，所以会出现「同一批导出，有的正常有的乱码」。
   // 加个 UTF-8 BOM 就是明着告诉它别猜。
-  // ⚠️ **只给 .md 加**：JSON 带 BOM 会让 `JSON.parse` / Python 的 `json.loads` 直接报错
+  // ⚠️ **只给 .md 和 .txt 加**：JSON 带 BOM 会让 `JSON.parse` / Python 的 `json.loads` 直接报错
   //    （`make-epub.py` 和网页阅读器读的就是 `_原始数据.json`），EPUB 里的 XHTML 也不要。
+  //    体检报告是 .txt，Windows 记事本和安卓的文本查看器同样会自己猜编码，所以一并加上。
   const BOM = '\uFEFF'; // 写成转义：源码里别放不可见字符，会被编辑器/脚本悄悄吃掉 // 写成转义，别在源码里放不可见字符——会被编辑器/脚本悄悄吃掉
-  const wantsBom = (name) => /\.md$/i.test(name || '');
+  const wantsBom = (name) => /\.(md|txt)$/i.test(name || '');
   const withBom = (name, text) =>
     wantsBom(name) && !String(text).startsWith(BOM) ? BOM + text : text;
 
@@ -462,7 +466,8 @@
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       const nameBytes = enc.encode(f.name);
-      // withBom 只对 .md 生效；.json 和 EPUB 内部的 xhtml/opf/ncx 一律不加
+      // withBom 只对 .md / .txt 生效；.json、.jsonl 和 EPUB 内部的 xhtml/opf/ncx 一律不加
+      // （包里目前没有 .txt —— 体检报告是直接下载的，不进包）
       const raw = f.bytes ? f.bytes : enc.encode(withBom(f.name, f.text));
       // 🔴 编码完立刻把源数据放掉。几百段对话的 Markdown 加上那份完整 JSON 会一直
       //    压在堆里，和压缩产物同时存在 —— 峰值能把标签页顶崩。
@@ -862,6 +867,9 @@
   const LIST_MAX_PAGES = 60;          // 200 × 60 = 12000 个角色
   let listTruncated = false;          // 撞到上限了没有，给调用方报出来
 
+  // ⚠️ 别往这儿加 folderId —— 2026-08-25 实测 query_session **根本不认**
+  //    folderId / favoriteId（加不加都是同样的 302 个）。按收藏夹筛只能走
+  //    getFolderCharacters 那个接口，给这里加参数只是自欺欺人。
   async function getCharacterList(followedOnly) {
     const out = [];
     const seen = new Set();
@@ -888,6 +896,320 @@
   // 判据：没有 lastSessionId（这类的 lastInteracted 是 0001-01-01 的零值）
   function hasChatted(c) {
     return !!c.lastSessionId;
+  }
+
+  // ---------- 收藏夹 ----------
+  // 🔴 2026-08-25 在真账号上把这两个接口验出来了。**原型里那个 `/api/folders/query`
+  //    是 AI 编的，真发过去是 404** —— 差一点就照着一个不存在的接口发版。
+  //    真的是这两个：
+  //      · GET /api/favorites/list?pageNum=&pageSize=  收藏夹清单。
+  //        外壳和 query_session 一样：{ page, pageSize, total, hasNext, data:[…] }；
+  //        夹的字段是 **id（数字，不是 UUID）/ name / characterCnt**。
+  //      · GET /api/favorites/?id=<夹的 id>            夹里的角色。
+  //        挂在 **characters** 上（不是 data），字段名也和 query_session 两套：
+  //        **characterName**（不是 name），而且**没有 lastInteracted**。
+  //    ⚠️ 最要紧的一条：**query_session 根本不认 folderId / favoriteId**
+  //       （实测加不加都是同样的 302 个）。所以按收藏夹筛只能走第二个接口。
+  const FOLDER_MAX_PAGES = 20;
+
+  async function getFolders() {
+    try {
+      const out = [];
+      let page = 1, truncated = false;
+      for (;;) {
+        const d = await api(`/api/favorites/list?pageNum=${page}&pageSize=100`);
+        const rows = (d && d.data) || [];
+        for (const f of rows) {
+          if (!f || (!f.id && f.id !== 0)) continue;
+          out.push({ folderId: String(f.id), name: f.name || '未命名收藏夹', count: f.characterCnt || 0 });
+        }
+        if (!rows.length || !d || d.hasNext === false) break;
+        page += 1;
+        if (page > FOLDER_MAX_PAGES) { truncated = true; break; }
+        await sleep(120);
+      }
+      return { list: out, error: '', truncated };
+    } catch (e) {
+      // 读不到就当没有，但**原因要带出去**：静默退成「全部收藏夹」会让人以为
+      // 自己没有收藏夹、或者以为筛选生效了，两种误会都比多一行红字糟。
+      return { list: [], error: (e && e.message) || String(e), truncated: false };
+    }
+  }
+
+  // 夹里的角色。
+  // 🔴 这个接口**不分页**（实测 pageSize=2 照样把 9 个全给），所以别指望翻页；
+  //    但它自己报了 characterCnt，**「说有几个」和「实际给回几个」必须对一遍**。
+  //    2026-08-25 实测：一个装着已下架角色的夹，**说有 6 个、characters 是空数组**。
+  //    差额就是「这个夹里已经没了的角色」，mufy 连名字都不给。
+  //    ⚠️ 这个数字是别处拿不到的 —— 那些角色早就从「已关注」「聊过的」两份列表里
+  //       被摘掉了，只有收藏夹的计数还记着它们存在过。所以这个差额必须喊出来。
+  async function getFolderCharacters(folderId) {
+    const d = await api('/api/favorites/?id=' + encodeURIComponent(folderId));
+    const list = [];
+    for (const c of (d && d.characters) || []) {
+      if (!c || !c.characterId) continue;
+      // 字段名统一成 query_session 那一套再往下传，否则名字会整片变成 undefined
+      list.push({
+        characterId: c.characterId,
+        name: c.characterName || c.name || '',
+        lastSessionId: c.lastSessionId || '',
+        lastInteracted: '',              // 这个接口不给，别假装有
+      });
+    }
+    const said = typeof (d && d.characterCnt) === 'number' ? d.characterCnt : null;
+    return {
+      list,
+      said,
+      name: (d && d.name) || '',
+      missing: said === null ? 0 : Math.max(0, said - list.length),
+    };
+  }
+
+  // 少给了就得喊，而且这句话要能进报告 —— 只写日志会被后面几百行冲走
+  function folderShortfallNote(folderName, said, got) {
+    return `收藏夹「${folderName}」说有 ${said} 个角色，mufy 实际只给回 ${got} 个，少了 ${said - got} 个。`
+      + `少的那几个**连名字都拿不到**：常见是角色已下架、或者作者把卡设为私密。`
+      + `它们同时也被从「已关注」和「聊过的」两份列表里摘掉了，所以不会出现在下面的名单里。`
+      + `想把和它们的聊天记录救回来，只能走范围里的「救回卡已消失的角色」`
+      + `（Ctrl+H 翻浏览器历史找 roleId）。`;
+  }
+
+  // ---------- 体检：只看状态，不导内容 ----------
+  // 需求来自小红书用户 clover：收藏了几百个角色，想知道哪些卡还在、哪些记录空了 ——
+  // 而 mufy 网页上只能一个一个点进去数（连右键在新标签页打开都不行）。
+  // 她照本脚本的思路让 AI 生成了一份原型，并同意我们改好之后合并发布，这一节由此而来。
+  //
+  // 🔴 原型里有一条判据是错的，必须在这儿改掉：它只问了 lastSessionId 那一段，
+  //    那一段空就报「记录已清空」。可**存档是另一套东西**（collectCharacter 上面那整段
+  //    讲的就是这件事）：一个角色完全可能存档满满、而「最后聊的那段」是空的。
+  //    照原型那个判法，这种角色会被告知「记录已清空」——是假的，而且吓人。
+  //    这里的判据：**存档和活段都空，才叫空。**
+  //
+  // 🔴 两件必须写进报告、不能只活在代码里的事：
+  //    ① **被作者设为私密的角色根本不会出现在体检结果里** —— mufy 把它从两份列表里
+  //       一起摘掉了，而体检能枚举的只有列表。不明说的话，用户看到「一个私密的都没有」
+  //       会以为自己运气好。
+  //    ② **「一条记录都不剩」不等于真的没了** —— 没有会员时，过期的历史存档在 mufy 那边
+  //       就看不到、接口也不返回。那种角色在这里同样显示成空的，而它其实还在服务器上。
+  const CHECK_BUCKETS = [
+    ['gone',  '🔒', '卡取不到了（作者删了卡）'],
+    ['empty', '💬', '卡还在，但一条记录都不剩了'],
+    ['never', '📭', '从没聊过'],
+    ['error', '❓', '这次没查出来'],
+    ['ok',    '✅', '正常'],
+  ];
+  // 卡没了是「卡」的事，记录空了是「记录」的事，两者互不蕴含 ——
+  // 所以行里两个字段分开存，只有分组时才合成一个桶（卡没了优先，因为救法完全不同）。
+  const bucketOf = (r) => (r.status === 'error' ? 'error' : r.cardGone ? 'gone' : r.status);
+  const bucketIcon = (k) => (CHECK_BUCKETS.find((x) => x[0] === k) || [0, '·'])[1];
+
+  const CHECK_ADVICE = {
+    gone: [
+      '这些角色的卡被作者删了（接口明确答复「没有这张卡」，不是网络问题）。开场白拿不到了。',
+      '**但你的聊天记录多半还在**，照常导得出来：范围选「全部聊过的角色」，',
+      '或者「手动填角色 ID」把下面这些 ID 一个个补导。',
+      '⚠️ 下面标了「连记录也不剩了」的那几个除外 —— 那种卡和记录一起没，导也导不出内容。',
+    ],
+    empty: [
+      '这些是**卡还在、但 mufy 那边一段存档都没有、最后聊的那段也一条不剩**。',
+      '⚠️ 先别急着当成丢了：没有会员时，过期的历史存档在 mufy 那边就看不到、接口也不返回，',
+      '   在这儿同样会显示成空的。续上会员再体检一次，数字可能就变回来了。',
+      '如果本来就没有会员这回事，那多半是真的空了 —— 服务器上没有的东西，脚本也变不出来。',
+    ],
+    never: [
+      '关注了但从没聊过，所以没有任何对话记录。**但开场白还挂在卡上**（常有一两千字）。',
+      '想把开场白留下来：范围选「全部已关注角色」，勾上「连没聊过的也导」。',
+      '⏳ 卡还在才拿得到 —— 作者一旦删卡或设为私密，开场白也跟着没了。',
+    ],
+    error: [
+      '这几个这次没查出来，多半是网络抖动，不代表角色有问题。',
+      '救法：把「从第几个角色开始」填上它的序号再体检一次，前面的不用重跑。',
+    ],
+    ok: [],
+  };
+
+  // 一段对话里到底还有没有内容 —— 只问一条就够，不用翻页。
+  // ⚠️ 故意不看接口自报的 total：本仓已经查实它会撒谎（见 getDialogs 上面那段），
+  //    这里只看「这一条给没给」，那是不会骗人的。
+  async function sessionHasMessages(sessionId, characterId) {
+    const d = await api(
+      `/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}` +
+      `&characterId=${encodeURIComponent(characterId)}&pageNum=1&pageSize=1`
+    );
+    return (((d && d.data) || []).length) > 0;
+  }
+
+  // 体检一个角色。每个角色 1～3 个请求，全程只读，不改动任何数据。
+  async function checkOne(c) {
+    const id = c.characterId;
+    const row = {
+      name: c.name || id.slice(0, 8),
+      characterId: id,
+      followed: !!c.followed,
+      chatted: !!c.chatted,
+      lastSessionId: c.lastSessionId || '',
+      lastInteracted: c.lastInteracted || '',
+      cardGone: false,
+      archives: 0,
+      liveHasMessages: null,     // null ＝ 没必要问（有存档就已经定性了）
+      status: 'error',
+      detail: '',
+    };
+
+    // 1) 卡还在不在。
+    // 🔴 这里**不能用 getCharacter**：它把所有失败都归成同一个 missing，
+    //    而「接口明确说没有这张卡」和「这次网络没通」在体检里是两个完全不同的结论 ——
+    //    前者写进报告是「作者删了卡」（不可逆），后者只是「这次没查出来」（重跑就好）。
+    //    用 getCharacter 会让一次断网把一整批角色写成「卡都没了」，那是最坏的谎报。
+    //    ⚠️ 设为私密的那种会被 mufy 从列表里摘掉，压根走不到这一步（见本节开头）。
+    //    ⚠️ 卡没了的时候返回里的 lastSessionId 也跟着没了，但**列表里那份还在**，
+    //       所以全程用 row.lastSessionId（来自列表）。
+    let card = null;
+    try {
+      card = await api('/api/characters/get?id=' + encodeURIComponent(id), undefined, 2);
+    } catch (e) {
+      if (/续不上登录态/.test(e.message)) throw e;
+      const msg = e.message || String(e);
+      if (/HTTP (404|500)|not found/i.test(msg)) {
+        // 实测：作者删了卡之后这个接口就是 500（本仓 collectCharacter 上面那段有记录）。
+        // 它还在你的列表里 ⇒ 是删卡，不是设私密。
+        row.cardGone = true;
+      } else {
+        // 403（防护拦截 / 没权限）、网络错误、重试用光 —— 都不该说成"卡没了"
+        row.detail = '角色卡这次读不到：' + msg;
+        return row;                                  // status 留在 error
+      }
+    }
+    if (card) {
+      if (card.name) row.name = card.name;
+      if (!row.lastSessionId && card.lastSessionId) row.lastSessionId = card.lastSessionId;
+    }
+
+    // 2) 存档。有存档就已经能定性「记录还在」，不用再问活段 —— 省掉一半请求。
+    try {
+      row.archives = (await getArchives(id)).length;
+    } catch (e) {
+      if (/续不上登录态/.test(e.message)) throw e;   // 掉登录是整批的事，不是这个角色的事
+      row.detail = '存档列表读不到：' + e.message;
+      return row;                                    // status 留在 error
+    }
+    if (row.archives > 0) {
+      row.status = 'ok';
+      row.detail = `${row.archives} 段存档`;
+      return row;
+    }
+
+    // 3) 没有存档，那就看「最后聊的那一段」还在不在
+    if (!row.lastSessionId) {
+      if (row.chatted) {
+        // 它出现在「聊过的角色」列表里，却连活段的线索都没有 ——
+        // 这是记录不剩了，不是没聊过。两者的说法不能混，救法也不同。
+        row.status = 'empty';
+        row.detail = '在「聊过的角色」列表里，却没有存档、也没有「最后聊的那一段」。';
+      } else {
+        row.status = 'never';
+        row.detail = '没有存档，也没有「最后聊的那一段」——从没聊过。';
+      }
+      return row;
+    }
+    try {
+      row.liveHasMessages = await sessionHasMessages(row.lastSessionId, id);
+    } catch (e) {
+      if (/续不上登录态/.test(e.message)) throw e;
+      row.detail = '「最后聊的那一段」读不到：' + e.message;
+      return row;                                    // status 留在 error
+    }
+    if (row.liveHasMessages) {
+      row.status = 'ok';
+      row.detail = '没有存档，但「最后聊的那一段」还在（这种段只有本脚本导得出来）。';
+    } else {
+      row.status = 'empty';
+      row.detail = '存档 0 段，「最后聊的那一段」也一条不剩。';
+    }
+    return row;
+  }
+
+  // 体检一整批。startAt 和导出那条路共用同一套编号，中断了能接着跑。
+  // 🔴 结果写进调用方给的 rows，**不是自己 return 一个新数组** ——
+  //    中途掉登录会往上抛，那时候已经查到的几百个必须还在调用方手里，
+  //    照样能出报告。（本仓 getDialogs「别抛，保住已经抓到的」是同一条教训。）
+  async function checkAll(chars, report, startAt, rows) {
+    const total = chars.length;
+    let seq = Math.max(1, startAt || 1) - 1;
+    for (const c of chars.slice(seq)) {
+      seq += 1;
+      const row = await checkOne(c);               // 掉登录会往上抛，让整批停下来
+      rows.push(row);
+      report(`${bucketIcon(bucketOf(row))} [${seq}/${total}] ${row.followed ? '⭐' : '○'} 【${row.name}】${row.detail}`);
+      await sleep(150);
+    }
+    return { rows, stoppedAt: seq };
+  }
+
+  // 报告正文。纯函数（rows 进、文本出），挂在 __mufyExporter 上可以拿假数据直接验。
+  function buildCheckReport(rows, meta) {
+    const L = [];
+    L.push(`Mufy 角色体检报告　v${VERSION}`);
+    L.push(`生成时间：${new Date().toLocaleString('zh-CN')}`);
+    L.push(`体检范围：${meta.scopeLabel}`);
+    if (meta.folderLabel) L.push(`收藏夹：${meta.folderLabel}`);
+    L.push(`这份报告里有 ${rows.length} 个角色`);
+    L.push('');
+
+    L.push('── 摘要 ──');
+    for (const [key, icon, label] of CHECK_BUCKETS) {
+      L.push(`${icon} ${label}：${rows.filter((r) => bucketOf(r) === key).length}`);
+    }
+    L.push('');
+
+    // 🔴 这一段必须排在名单**前面**。放结尾没人看得见，而它决定了整份名单该怎么读。
+    L.push('── 先读这段：这份报告查不到什么 ──');
+    for (const t of (meta.notes || [])) {
+      for (const line of String(t).split('\n')) L.push('· ' + line);
+    }
+    L.push('');
+
+    for (const [key, icon, label] of CHECK_BUCKETS) {
+      const list = rows.filter((r) => bucketOf(r) === key);
+      if (!list.length) continue;
+      L.push(`── ${icon} ${label}（${list.length} 个）──`);
+      for (const a of (CHECK_ADVICE[key] || [])) L.push('  ' + a);
+      if ((CHECK_ADVICE[key] || []).length) L.push('');
+      for (const r of list) {
+        L.push(`  ${r.followed ? '⭐已收藏' : '○未收藏'}　${r.name}`);
+        L.push(`      角色ID：${r.characterId}`);
+        if (r.detail) L.push(`      ${r.detail}`);
+        // 卡没了的那一栏里，还得再分一次：记录也空的那几个，上面那句「记录还在」对它们是错的
+        if (key === 'gone' && r.status === 'empty') L.push('      ⚠️ 连记录也不剩了（卡和记录一起没）。');
+        // 0001-01-01 是「从没互动过」的零值，原样印出来只会让人以为记录坏了
+        if (r.lastInteracted && !/^0001-/.test(r.lastInteracted)) {
+          L.push(`      最后互动：${r.lastInteracted}`);
+        }
+      }
+      L.push('');
+    }
+
+    // clover 最初要的就是这一栏：聊过、记录没了、还没收藏 —— 最容易被自己忘掉的一批
+    const target = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
+    if (target.length) {
+      L.push(`── 🎯 未收藏 ＋ 一条记录都不剩（${target.length} 个）──`);
+      L.push('  这批最容易被忘掉：你聊过它，但没收藏，现在记录也不剩了。');
+      L.push('  收藏并不会把记录变回来，只是让你以后还找得到它。');
+      L.push('');
+      for (const r of target) L.push(`  ○ ${r.name}　${r.characterId}`);
+      L.push('');
+    }
+
+    L.push('── 这份报告是怎么判的 ──');
+    L.push('  ✅ 正常　　＝ 卡还在，且（有存档 或 「最后聊的那一段」里还有内容）');
+    L.push('  🔒 卡取不到＝ characters/get 取不到这张卡；它还在你的列表里，所以是作者删了卡');
+    L.push('  💬 一条不剩＝ 卡还在，但存档 0 段、「最后聊的那一段」也 0 条');
+    L.push('  📭 从没聊过＝ 没有存档，也没有「最后聊的那一段」');
+    L.push('  ❓ 没查出来＝ 这次请求失败了（网络抖动居多），不代表这个角色有问题');
+    L.push('');
+    L.push('  ⚠️ 只看「最后聊的那一段」是判不出空不空的 —— 存档是另一套东西，');
+    L.push('     完全可能存档满满而最后那段是空的。所以这里两边都查，都空才算空。');
+    return L.join('\n');
   }
 
   // ---------- 人设面具 ----------
@@ -1260,6 +1582,138 @@
   // 只在「一批」的范围内计数：填了分批就自然不会撞到，这道闸是给没分批的人兜底的。
   const TOO_BIG_CHARS = 40000000;
 
+
+  // ---------- 抢救：一段太大，拆开导 ----------
+  // 🔴 2026-08-25 一位用户卡住了：她某个角色的**一段**有 9726 条 / 5015 万字，
+  //    「每包最多多少段对话」填到 1 都导不出来 —— 因为分包的最小单位就是 1 段，
+  //    而撑爆的正是这 1 段（见 collectCharacter 里那条判据）。
+  //
+  // 🔴🔴 **不要在这条路上做「折叠重复」。**
+  //    第一版设计过一套「把重复内容折叠起来、存重复单元+次数以便无损还原」的方案，
+  //    前提是暴走 ＝ 同一段话循环。**这个前提是错的**：mufy 的模型暴走时吐的是
+  //    **每次都不一样的新正文**，不是循环。内容不一样 ＝ 每个字都是真的，
+  //    折叠就成了真删东西。所以这条路的原则很硬：**一个字都不动，只按字数切开**。
+  //
+  //    做法也和 collectCharacter 那条路完全不同：它是「整段进内存 → 再打包」，
+  //    这里是**边翻页边出文件** —— 攒够一包就渲染、下载、扔掉，
+  //    内存峰值只跟「一包多大」有关，**跟这一段有多大无关**。
+  const PART_CHARS_DEFAULT_万 = 500;   // 每包 500 万字 ≈ 10MB 的 .md
+  // ⚠️ 小数字别硬换算成「万」：4000 字写成「0 万字」，用户只会以为这一段是空的
+  const 字数 = (n) => (n >= 10000 ? (n / 10000).toFixed(1) + ' 万字' : n + ' 字');
+  const PART_PAGE_SIZE = 200;
+  const PART_MAX_PAGES = 2000;         // 200 × 2000 ＝ 40 万条，防失控用
+
+  // 疑似从哪一条开始暴走。
+  // ⚠️ 这是**启发式**，所以话只能说「疑似」。它的用处不是给谁定罪，而是让你知道
+  //    「前几包是我真正的聊天，后面几包是暴走出来的」—— 不然几十个文件你不知道从哪读。
+  // 判据：拿前 20% 的中位数当基线，找第一条「超过基线 10 倍」、**而且后面也一直大**的。
+  //       只偶尔长一条（写了段长回复）不算。
+  function guessRunawayStart(lens) {
+    if (lens.length < 40) return null;
+    const headN = Math.max(20, Math.floor(lens.length * 0.2));
+    const head = lens.slice(0, headN).slice().sort((a, b) => a - b);
+    const base = head[Math.floor(head.length / 2)] || 0;
+    if (base <= 0) return null;
+    const 门槛 = Math.max(base * 10, 20000);
+    for (let i = 0; i < lens.length; i++) {
+      if (lens[i] < 门槛) continue;
+      const rest = lens.length - i;
+      let big = 0;
+      for (let j = i; j < lens.length; j++) if (lens[j] >= 门槛) big++;
+      if (big >= Math.max(3, rest * 0.3)) return { 第几条: i + 1, 基线: base, 门槛 };
+    }
+    return null;
+  }
+
+  // 边翻页边出包。onPart(msgs, partNo, from, to) 由调用方负责渲染＋下载＋释放。
+  // 🔴 停止判据和 getDialogs 保持一致，别改回「信 total」那一套（那个坑咬过三次）：
+  //    满页 → 后面还可能有，继续；不满 / 空 / 一条新 ID 都没有 / hasNext===false → 到头。
+  // 🔴 某一页失败**不抛**：已经出的包是真的，不能因为最后一页抖了一下就全没。
+  async function streamSessionParts(sessionId, characterId, partChars, onPart) {
+    const seen = new Set();
+    const lens = [];
+    let buf = [], bufChars = 0, partNo = 0, got = 0;
+    let expected = null, stopped = '';
+    let asc = true, desc = true, prevT = null;
+    let earliest = '', latest = '';
+    let page = 1;
+    for (;;) {
+      let d;
+      try {
+        d = await api(`/api/dialogs/query?sessionId=${encodeURIComponent(sessionId)}` +
+                      `&characterId=${encodeURIComponent(characterId)}&pageNum=${page}&pageSize=${PART_PAGE_SIZE}`);
+      } catch (e) {
+        if (/续不上登录态/.test(e.message)) throw e;   // 掉登录是整批的事
+        stopped = `第 ${page} 页取失败：${e.message}`;
+        break;
+      }
+      const rows = (d && d.data) || [];
+      if (expected === null && d && typeof d.total === 'number') expected = d.total;
+      let fresh = 0;
+      for (const m of rows) {
+        if (seen.has(m.dialogsId)) continue;
+        seen.add(m.dialogsId); fresh++;
+        // 接口给的顺序不保证是按时间的（getDialogs 结尾要 sort 就是因为这个）。
+        // 这里没法全局排序（全局就意味着全进内存），所以**记下方向**，
+        // 每包内部自己排好，方向再写进报告和文件抬头 —— 不能让人猜。
+        const t = m.createdTime ? new Date(m.createdTime).getTime() : null;
+        if (t !== null) {
+          if (prevT !== null) { if (t < prevT) asc = false; if (t > prevT) desc = false; }
+          prevT = t;
+          const s = String(m.createdTime).slice(0, 16).replace('T', ' ');
+          if (!earliest || s < earliest) earliest = s;
+          if (!latest || s > latest) latest = s;
+        }
+        const n = typeof m.content === 'string' ? m.content.length
+          : (m.content ? JSON.stringify(m.content).length : 0);
+        lens.push(n);
+        got += 1;
+        buf.push(m); bufChars += n;
+        if (bufChars >= partChars) {
+          partNo += 1;
+          // 方向按「到目前为止看到的」传出去：等整段跑完才算就晚了，
+          // 那时候文件早出完了，抬头里那句提示永远是 false。
+          await onPart(buf, partNo, got - buf.length + 1, got, bufChars, desc && !asc);
+          buf = []; bufChars = 0;      // 🔑 出完就扔 —— 这一行就是这条路存在的理由
+        }
+      }
+      if (!fresh || rows.length < PART_PAGE_SIZE || (d && d.hasNext === false)) break;
+      page += 1;
+      if (page > PART_MAX_PAGES) { stopped = `翻到第 ${PART_MAX_PAGES} 页上限还没结束，可能没取全`; break; }
+      await sleep(120);
+    }
+    if (buf.length) { partNo += 1; await onPart(buf, partNo, got - buf.length + 1, got, bufChars, desc && !asc); }
+    return { got, expected, parts: partNo, stopped, lens, asc, desc, earliest, latest };
+  }
+
+  // 一包 → 一份 .md。内容一个字不删，只是分开装。
+  function partToMarkdown(info, msgs, opts) {
+    const L = [];
+    L.push(`# ${info.charName} · 第 ${info.segNo} 段 · 第 ${info.from}–${info.to} 条`);
+    L.push('');
+    L.push(`- 角色 ID：\`${info.characterId}\``);
+    L.push(`- session：\`${info.sessionId}\``);
+    L.push(`- 这一包：${msgs.length} 条，约 ${字数(info.chars)}`);
+    L.push(`- 导出时间：${new Date().toLocaleString('zh-CN')}`);
+    if (info.desc) L.push('- ⚠️ 接口是按**从新到旧**给的，所以第 1 包是最近的那部分，包号越大越早');
+    if (opts.tidy) L.push('- 已清理 `<think>` 与状态栏 HTML（完整原文看同名 .json）');
+    L.push('');
+    L.push('> 🚑 这是「拆开导」出来的一包。这一段整段导会把浏览器撑爆，所以按字数切开了。');
+    L.push('> **内容一个字都没删**，只是分成几个文件装。');
+    L.push('', '---', '');
+    // 包内自己排好序：接口顺序不保证，但一包是有界的，排得起
+    const sorted = msgs.slice().sort((a, b) => new Date(a.createdTime || 0) - new Date(b.createdTime || 0));
+    for (const m of sorted) {
+      const who = m.role === 'user' ? '🩷 我' : m.role === 'assistant' ? `🖤 ${info.charName}` : m.role;
+      const t = m.createdTime ? new Date(m.createdTime).toLocaleString('zh-CN') : '';
+      let body = contentToText(m.content);
+      if (opts.tidy) body = tidy(body);
+      if (!body.trim()) continue;
+      L.push(`**${who}**　<sub>${t}</sub>`, '', body, '');
+    }
+    return L.join('\n');
+  }
+
   // ---------- 组装一个角色的导出内容 ----------
   // liveSessionId = 角色列表里的 lastSessionId，也就是这个角色"活着的"那段对话。
   // ⚠️ 只走存档列表会漏掉它：你聊过但从没按"保存"的对话，存档接口根本不列。
@@ -1446,16 +1900,37 @@
       //    「内存不够就填分批」这句话根本没机会说出口。所以必须**主动**停。
       //    判据用「攥在手里的字数」而不是「段数」：段多但每段很小是完全没问题的
       //    （实测 53 段一次导没事），真正撑爆浏览器的是内容体量。
-      acc += dialogs.reduce((n, d) => n + (typeof d.content === 'string'
+      const thisChars = dialogs.reduce((n, d) => n + (typeof d.content === 'string'
         ? d.content.length
         : (d.content ? JSON.stringify(d.content).length : 0)), 0);
+      acc += thisChars;
+      // 🔴 判据必须是「**一段**就撑爆了没有」，不是「填没填分包」。
+      //    以前这里只看 opts.chunk，于是 chunk 已经是 1 时算出
+      //    Math.max(1, Math.floor(1/2)) === 1 —— 脚本在劝人「把 1 改小一点，比如 1」。
+      //    用户照做只会再撞一次，还以为是自己填错了。
+      //    2026-08-25 一位用户就卡在这儿：她那一段 **9726 条 / 5015 万字**，
+      //    而「每包最多多少段」的最小单位就是 1 段 —— 撑爆的正是这 1 段，
+      //    **这条路在原理上就走不通**，再怎么调都没有用。
+      //    两种情况的救法完全不同，所以话也必须分开说。
+      if (thisChars > TOO_BIG_CHARS) {
+        const 这段万 = Math.round(thisChars / 10000);
+        throw new Error(
+          `**单独这一段**就太大了：第 ${from + i} 段有 ${dialogs.length} 条消息、约 ${这段万} 万字，` +
+          `再往下会把整个标签页撑爆（浏览器直接崩，连日志都留不下）。` +
+          `⚠️ 分包救不了这种 ——「每包最多多少段」的最小单位就是 1 段，而撑爆的正是这 1 段，` +
+          `填多少都一样。` +
+          `这种通常是聊天时模型暴走了（表情刷屏、或者同一段正文无限循环），当时不一定看得出来。` +
+          `下一步：先跑一次「段太大体检」把它到底是什么样看清楚 —— 见 README「一段太大导不出来」那节。`
+        );
+      }
       if (acc > TOO_BIG_CHARS) {
         const 万 = Math.round(acc / 10000);
         throw new Error(
-          `这个角色太大了：才抓到第 ${i} 段就已经有约 ${万} 万字堆在内存里，` +
+          `这个角色太大了：抓到第 ${i} 段时已经有约 ${万} 万字堆在内存里，` +
           `再往下多半会把整个标签页撑爆（浏览器直接崩，连日志都留不下）。` +
+          `（单独每一段都还没到上限，是**攒起来**才超的 —— 这种分包就能解决。）` +
           (opts.chunk
-            ? `你已经填了「每包最多 ${opts.chunk} 段」，请再调小一点（比如 ${Math.max(1, Math.floor(opts.chunk / 2))}）。`
+            ? `你填的是「每包最多 ${opts.chunk} 段」，改成 ${Math.max(1, Math.floor(opts.chunk / 2))} 再导一次。`
             : `请在面板的「每包最多多少段对话」里填 5 再导一次——` +
               `它会改成一批批地抓、抓完打包就放掉，内存峰值只跟一批有关。`)
         );
@@ -2407,8 +2882,10 @@ ${ncxpts.join('\n')}
           <option value="live">当前角色 · 只要正在聊的这一段</option>
           <option value="chatted">全部聊过的角色（慢）</option>
           <option value="followed">全部已关注角色（慢，含没聊过的）</option>
+          <option value="check">🩺 体检：哪些卡没了 / 哪些记录空了（不导内容）</option>
           <option value="manual">手动填角色 ID</option>
           <option value="rescue">救回卡已消失的角色（粘聊天页地址）</option>
+          <option value="bigsplit">🚑 拆开导（某一段太大、导不出来时用）</option>
           <option value="masks">人设面具（全部，不是聊天记录）</option>
           <option value="cards">我创建的角色卡（全部）</option>
         </select>
@@ -2426,6 +2903,24 @@ ${ncxpts.join('\n')}
         输出设定／样例对话／正则条目等全字段明文，<b>头像和封面图真下下来</b>。<br>
         官方「引继码」XML 把小剧场和全局美化加密了，这里是明文。
       </div>
+      <div id="mufyx-checktip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        <b>只查状态、不导内容。</b>一次性告诉你：哪些角色的卡被作者删了、哪些的记录一条都不剩了、
+        哪些是关注了但从没聊过。跑完出一份 TXT 报告（勾了下面的 JSON 就再多一份机读的 .json）。<br>
+        全程<b>只读</b>——不会改动、删除、取关任何东西。<br>
+        ⚠️ <b>被作者设为私密的角色查不到</b>：mufy 把它从列表里整个摘掉了，脚本枚举不到。
+        那种要用范围里的「救回卡已消失的角色」，报告开头也会再说一遍。
+      </div>
+      <label id="mufyx-checkscopewrap" style="display:none">体检哪些角色
+        <select id="mufyx-checkscope">
+          <option value="merged">收藏的 ＋ 聊过的（推荐，最全，也最慢）</option>
+          <option value="followed">只查收藏的</option>
+          <option value="chatted">只查聊过的</option>
+        </select>
+      </label>
+      <label id="mufyx-folderwrap" style="display:none">收藏夹
+        <select id="mufyx-folder"><option value="">全部收藏夹</option></select>
+      </label>
+      <div id="mufyx-foldertip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0"></div>
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
@@ -2441,6 +2936,21 @@ ${ncxpts.join('\n')}
         🔑 <b>分不清哪条是哪个角色？不用分</b> —— <b>一股脑全粘进来</b>，
         脚本会先拉一遍角色列表，<b>还在的自动挑掉</b>，只救真正消失的。<br>
         ⏳ 历史一般只留 90 天。手机怎么翻见 README「作者把角色卡设为私密」那节。
+      </div>
+      <div id="mufyx-splittip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        <b>某一段太大、整段导不出来时用这个。</b>它<b>边翻页边出文件</b>——攒够一包就存下来、
+        立刻放掉，所以内存只跟「一包多大」有关，跟这一段有多大<b>没关系</b>。<br>
+        🔑 <b>内容一个字都不删</b>，只是分成几个文件装。<br>
+        ⚠️ 「每包最多多少段」对这种情况<b>没用</b>：它的最小单位就是 1 段，而撑爆的正是这 1 段。<br>
+        角色 ID 留空＝导你当前正开着的这个角色。跑完还会出一份「拆包报告」，
+        告诉你这一段是从第几条开始暴走的、哪几包才是你真正的聊天。
+      </div>
+      <label id="mufyx-partwrap" style="display:none">每包最多多少万字
+        <input type="number" id="mufyx-partsize" min="10" step="10" value="500">
+      </label>
+      <div id="mufyx-parttip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        默认 500 万字 ≈ 一个 10MB 的文件。手机内存小就填 <b>100</b>，文件多一点但更稳。<br>
+        ⚠️ 从第二个文件起浏览器可能问「是否允许下载多个文件」，<b>一定要点允许</b>。
       </div>
       <label id="mufyx-chunkwrap">每包最多多少段对话（留空＝不分包）
         <input type="number" id="mufyx-chunk" min="1" step="1" placeholder="留空＝一个角色一个包">
@@ -2458,7 +2968,7 @@ ${ncxpts.join('\n')}
         下次填它的下一个。<br>
         ⚠️ 顺序按「最近聊过」排，<b>中途别去聊天</b>，不然编号会变。
       </div>
-      <label>输出方式
+      <label id="mufyx-shapewrap">输出方式
         <select id="mufyx-shape">
           <option value="split">每段对话一个文件（打包成 ZIP）</option>
           <option value="one">全部合并成一份 Markdown</option>
@@ -2476,8 +2986,8 @@ ${ncxpts.join('\n')}
         勾上会给它们各出一个只装开场白的包。<br>
         ⏳ <b>卡还在才拿得到</b>——作者一旦删卡或设为私密，开场白也跟着没了。
       </div>
-      <label><input type="checkbox" id="mufyx-tidy" checked> 清理 think / 状态栏 HTML</label>
-      <label><input type="checkbox" id="mufyx-json" checked> 附带 JSON 完整备份</label>
+      <label id="mufyx-tidywrap"><input type="checkbox" id="mufyx-tidy" checked> 清理 think / 状态栏 HTML</label>
+      <label><input type="checkbox" id="mufyx-json" checked> <span id="mufyx-jsonlabel">附带 JSON 完整备份</span></label>
       <div class="row">
         <button id="mufyx-go">开始导出</button>
       </div>
@@ -2489,6 +2999,46 @@ ${ncxpts.join('\n')}
 
     const $ = (id) => panel.querySelector('#' + id);
     $('mufyx-close').onclick = () => { panel.remove(); panel = null; };
+
+    // 收藏夹列表：用到才拉（不选收藏夹的人不该为它多发一个请求）。
+    // 🔴 拉不到必须说出来 —— 静默留一个孤零零的「全部收藏夹」会让人以为
+    //    「我没有收藏夹」或者「筛选生效了」，两种误会都比多一行红字糟得多。
+    // ⚠️ 收藏夹名一律走 textContent：名字里带 < 也不会把面板顶坏。
+    let folderLoaded = false;
+    async function loadFolders() {
+      if (folderLoaded) return;
+      folderLoaded = true;
+      const sel = $('mufyx-folder');
+      const tip = $('mufyx-foldertip');
+      tip.textContent = '正在读收藏夹…';
+      const got = await getFolders();
+      const keep = sel.value;
+      sel.textContent = '';
+      const all = document.createElement('option');
+      all.value = ''; all.textContent = '全部收藏夹';
+      sel.appendChild(all);
+      for (const f of got.list) {
+        const o = document.createElement('option');
+        o.value = f.folderId;
+        // 带上数量：夹里「说有几个」和体检最后查到几个对不上时，一眼能看出来
+        o.textContent = f.name + '（' + f.count + '）';
+        sel.appendChild(o);
+      }
+      if (keep) sel.value = keep;
+      if (got.error) {
+        folderLoaded = false;   // 这次没成，下次切回来还能再试
+        tip.textContent = '🔴 收藏夹列表没读到：' + got.error
+          + '。这次只能按「全部」跑 —— 不是你没有收藏夹，是这个接口这次没给。';
+      } else if (!got.list.length) {
+        tip.textContent = '这个账号下没有收藏夹（或者 mufy 这次没返回）。选「全部收藏夹」就行。';
+      } else {
+        tip.textContent = `读到 ${got.list.length} 个收藏夹（括号里是夹里的角色数）。`
+          + '收藏夹只筛「已关注」那一半——「聊过的角色」不挂在收藏夹底下，不受它影响。'
+          + '⚠️ 已下架 / 被设为私密的角色，mufy 连名字都不给，'
+          + '夹里的计数却还记着它们——差了几个脚本会当场喊出来。'
+          + (got.truncated ? ' 🔴 收藏夹多到翻页翻到上限了，可能没读全。' : '');
+      }
+    }
     // 面具那条路和聊天记录不共用参数：EPUB 无从谈起（没有对话可成章），
     // 「清理 think」也无从谈起（面具本来就是纯文本设定）。
     // 这两项不静默忽略，而是当场改掉界面说明白 —— 静默忽略等于骗人。
@@ -2496,11 +3046,17 @@ ${ncxpts.join('\n')}
       const scope = $('mufyx-scope').value;
       const isMask = scope === 'masks';
       const isCard = scope === 'cards';
+      const isCheck = scope === 'check';
+      const isSplit = scope === 'bigsplit';
       const other = isMask || isCard; // 这两条都不是聊天记录
       const shapeSel = $('mufyx-shape');
       const epubOpt = shapeSel.querySelector('option[value=epub]');
 
-      $('mufyx-idwrap').style.display = scope === 'manual' ? 'block' : 'none';
+      // 拆开导也要填角色 ID（留空＝当前页那个角色）
+      $('mufyx-idwrap').style.display = (scope === 'manual' || scope === 'bigsplit') ? 'block' : 'none';
+      $('mufyx-splittip').style.display = scope === 'bigsplit' ? 'block' : 'none';
+      $('mufyx-partwrap').style.display = scope === 'bigsplit' ? 'block' : 'none';
+      $('mufyx-parttip').style.display = scope === 'bigsplit' ? 'block' : 'none';
       const rescue = scope === 'rescue';
       $('mufyx-sidwrap').style.display = rescue ? 'block' : 'none';
       $('mufyx-sidtip').style.display = rescue ? 'block' : 'none';
@@ -2511,17 +3067,36 @@ ${ncxpts.join('\n')}
       $('mufyx-chunk').disabled = liveOnly || rescue;
       $('mufyx-chunk').placeholder = liveOnly ? '只导一段，用不上分包'
         : rescue ? '救援模式抓的是你点名的段，用不上分包' : '留空＝一个角色一个包';
-      // 「从第 N 个开始」只对成批跑的两个范围有意义（单个角色、面具、角色卡都不需要）
-      const batch = scope === 'chatted' || scope === 'followed';
+      // 「从第 N 个开始」只对成批跑的范围有意义（单个角色、面具、角色卡都不需要）。
+      // 体检同样成批跑、同样会在手机上被打断，所以它也要能接着跑。
+      const batch = scope === 'chatted' || scope === 'followed' || isCheck;
       $('mufyx-startwrap').style.display = batch ? 'block' : 'none';
       $('mufyx-starttip').style.display = batch ? 'block' : 'none';
       // 只有「全部已关注」里才可能混着从没聊过的（「全部聊过的角色」按定义都聊过）
       const followed = scope === 'followed';
       $('mufyx-nochatwrap').style.display = followed ? 'block' : 'none';
       $('mufyx-nochattip').style.display = followed ? 'block' : 'none';
-      // 分批只对聊天记录有意义（面具/角色卡不是按段组织的）
-      $('mufyx-chunkwrap').style.display = other ? 'none' : 'block';
-      $('mufyx-chunktip').style.display = other ? 'none' : 'block';
+      // 体检只查状态、不产出聊天内容，所以「输出方式」「分批」「清理 think」全都无从谈起。
+      // 一律当场藏掉并改说法，不留在那儿假装能用（面具那条路就是这么处理的）。
+      $('mufyx-checktip').style.display = isCheck ? 'block' : 'none';
+      $('mufyx-checkscopewrap').style.display = isCheck ? 'block' : 'none';
+      // 拆开导只出「按字数切的 .md（＋同名 .json）」，ZIP/EPUB/酒馆都无从谈起；
+      // 分批也无从谈起（它切的就是段内）。一律藏掉，不留在那儿假装能用。
+      $('mufyx-shapewrap').style.display = (isCheck || isSplit) ? 'none' : 'block';
+      $('mufyx-tidywrap').style.display = isCheck ? 'none' : 'block';
+      // 「附带 JSON」在体检下换个说法：它决定的是要不要再下一份**机读的报告**
+      $('mufyx-jsonlabel').textContent = isCheck ? '同时下一份 JSON 报告（机器可读）'
+        : isSplit ? '每包另附一份 JSON 原文（一包一个）'
+        : '附带 JSON 完整备份';
+      // 收藏夹只对「已关注」那一半有效：「聊过的角色」不挂在收藏夹底下
+      const wantFolder = scope === 'followed' || (isCheck && $('mufyx-checkscope').value !== 'chatted');
+      $('mufyx-folderwrap').style.display = wantFolder ? 'block' : 'none';
+      $('mufyx-foldertip').style.display = wantFolder ? 'block' : 'none';
+      if (wantFolder) loadFolders();
+
+      // 分批只对聊天记录有意义（面具/角色卡不是按段组织的；体检根本不产出内容）
+      $('mufyx-chunkwrap').style.display = (other || isCheck || isSplit) ? 'none' : 'block';
+      $('mufyx-chunktip').style.display = (other || isCheck || isSplit) ? 'none' : 'block';
       $('mufyx-masktip').style.display = isMask ? 'block' : 'none';
       $('mufyx-cardtip').style.display = isCard ? 'block' : 'none';
       $('mufyx-tidytip').style.display = other ? 'block' : 'none';
@@ -2563,9 +3138,11 @@ ${ncxpts.join('\n')}
       const MASK_TIP = '这一条导的不是聊天记录，所以「电子书」「酒馆」都用不上；' +
                        'ZIP 是一件一个文件＋目录＋原始 JSON，合并是全部接成一份。';
       $('mufyx-shapetip').innerHTML = other ? MASK_TIP : (SHAPE_TIP[shapeSel.value] || '');
+      $('mufyx-shapetip').style.display = (isCheck || isSplit) ? 'none' : 'block';
     };
     $('mufyx-scope').onchange = syncUI;
     $('mufyx-shape').onchange = syncUI;
+    $('mufyx-checkscope').onchange = syncUI;
     $('mufyx-go').onclick = () => run(panel);
   }
 
@@ -2757,6 +3334,304 @@ ${ncxpts.join('\n')}
         return;
       }
 
+      // 🚑 拆开导：某一段太大，整段导会把浏览器撑爆。边翻页边出文件，走完就结束。
+      // 这条路故意**不复用** collectCharacter —— 那一套是「整段进内存再打包」，
+      // 正是这里要绕开的东西。和「救回卡已消失的角色」一样，单开一条。
+      if (scope === 'bigsplit') {
+        const rid = ($('mufyx-id').value.trim() || qs('roleId') || '').trim();
+        if (!rid) {
+          throw new Error('请在「角色 ID」里填 roleId（地址栏 roleId= 后面那串），'
+            + '或者在那个角色的聊天页里再点一次「开始导出」。');
+        }
+        const part万 = Math.max(10, parseInt($('mufyx-partsize').value, 10) || PART_CHARS_DEFAULT_万);
+        const partChars = part万 * 10000;
+
+        const got0 = await getCharacter(rid);
+        const charName = got0.name;
+        if (got0.missing) {
+          report('⚠️ 这个角色的卡在 mufy 那边取不到了（作者删了卡、或者设为私密）。');
+          report('   开场白拿不到了，但**聊天记录照样导**，名字会退成角色 ID 前八位。');
+        }
+        report(`【${charName}】准备拆开导，每包最多 ${part万} 万字。`);
+
+        // 段清单：存档 + 「最后聊的那一段」（后者常常没存过档，只走存档会漏）
+        const segs = new Map();
+        try {
+          for (const a of await getArchives(rid)) {
+            if (a.sourceSessionId && !segs.has(a.sourceSessionId)) {
+              segs.set(a.sourceSessionId, String(a.createdAt || '').slice(0, 10) + (a.remark ? ' ' + a.remark : ''));
+            }
+          }
+        } catch (e) {
+          report(`  ⚠️ 存档列表读不到（${e.message}），只能导「最后聊的那一段」。`);
+        }
+        const live = qs('roleId') === rid && qs('sessionId') ? qs('sessionId') : got0.lastSessionId;
+        if (live && !segs.has(live)) segs.set(live, '最后聊的那一段（可能没存过档）');
+        if (!segs.has(live) && !segs.size) {
+          throw new Error('这个角色一段对话都列不出来。如果卡也没了，请改用「救回卡已消失的角色」，'
+            + '把聊天页地址整条粘进去。');
+        }
+        report(`  共 ${segs.size} 段，逐段拆。`);
+
+        const ts4 = stamp();
+        const stem = safeName(charName);
+        const R = [];                       // 拆包报告
+        R.push(`Mufy 拆开导 · 报告　v${VERSION}`);
+        R.push(`角色：${charName}`);
+        R.push(`roleId：${rid}`);
+        R.push(`导出时间：${new Date().toLocaleString('zh-CN')}`);
+        R.push(`每包上限：${part万} 万字`);
+        R.push('');
+        R.push('🔑 内容一个字都没删 —— 这条路只做一件事：按字数把太大的一段切成几个文件。');
+        R.push('');
+
+        let segNo = 0, 出了几个文件 = 0;
+        for (const [sid, label] of segs) {
+          segNo += 1;
+          report(`── 第 ${segNo}/${segs.size} 段　${sid.slice(0, 8)}…　${label}`);
+          const info = { charName, characterId: rid, sessionId: sid, segNo, desc: false };
+          const 本段文件 = [];
+          const st = await streamSessionParts(sid, rid, partChars, async (msgs, partNo, from, to, chars, desc) => {
+            info.from = from; info.to = to; info.chars = chars; info.desc = desc;
+            const base = `mufy_${stem}_${ts4}_第${segNo}段_第${from}-${to}条`;
+            download(base + '.md', partToMarkdown(info, msgs, opts));
+            if (opts.json) {
+              download(base + '.json', JSON.stringify({
+                characterId: rid, name: charName, sessionId: sid,
+                segNo, part: partNo, from, to, count: msgs.length,
+                exportedAt: new Date().toISOString(),
+                dialogs: msgs,
+              }, null, 2));
+            }
+            出了几个文件 += opts.json ? 2 : 1;
+            本段文件.push({ partNo, from, to, chars });
+            report(`  📦 第 ${partNo} 包：第 ${from}–${to} 条，约 ${字数(chars)}`);
+          });
+
+          R.push(`── 第 ${segNo} 段　${sid}　${label}`);
+          R.push(`   实际取到 ${st.got} 条（接口说 ${st.expected == null ? '?' : st.expected}）` +
+                 `，切成 ${st.parts} 包`);
+          if (st.earliest) R.push(`   时间跨度：${st.earliest} → ${st.latest}`);
+          const 总字 = st.lens.reduce((a, b) => a + b, 0);
+          R.push(`   共约 ${字数(总字)}，平均每条 ${Math.round(总字 / Math.max(1, st.got))} 字`);
+          if (st.desc && !st.asc) {
+            R.push('   ⚠️ 接口是按**从新到旧**给的：第 1 包是最近的那部分，包号越大越早。');
+          }
+          if (st.expected !== null && st.got < st.expected) {
+            R.push(`   🔴 接口说共 ${st.expected} 条，只取到 ${st.got} 条 —— 少的那些 mufy 那边也翻不出来了。`);
+            report(`  🔴 接口说 ${st.expected} 条，只取到 ${st.got} 条。`);
+          }
+          if (st.stopped) {
+            R.push(`   🔴 中途停了：${st.stopped}　（已经出的包是真的，没受影响）`);
+            report(`  🔴 中途停了：${st.stopped}`);
+          }
+          // 🔑 几十个文件摆在下载目录里，人不知道该从哪读。
+          //    把「疑似从第几条开始暴走」算出来，就能告诉她哪几包才是真正的聊天。
+          const ra = guessRunawayStart(st.lens);
+          if (ra) {
+            R.push(`   ⚠️ 疑似从第 ${ra.第几条} 条开始暴走：`);
+            R.push(`      前面平均每条 ${ra.基线} 字上下，这之后经常单条上万字。`);
+            // ⚠️ 分界落在第 1 包时，「它之前的包」根本不存在 —— 那句话自相矛盾。
+            //    两种情况说法必须分开，不然读的人会以为自己漏了几个文件。
+            const 分界 = 本段文件.find((f) => f.to >= ra.第几条);
+            if (分界 && 分界.partNo > 1) {
+              R.push(`      → 第 1–${分界.partNo - 1} 包（到第 ${分界.from - 1} 条为止）多半是你真正的聊天；`);
+              R.push(`        第 ${分界.partNo} 包跨在分界上，再往后基本都是暴走出来的内容。`);
+            } else if (分界) {
+              R.push(`      → 分界就落在**第 1 包里面**（这一包装的是第 ${分界.from}–${分界.to} 条）：`);
+              R.push(`        这一包前半截是你真正的聊天，从第 ${ra.第几条} 条起开始暴走；`);
+              R.push(`        后面的包基本都是暴走出来的内容。`);
+            }
+            R.push('      （这只是按字数猜的，不一定准，自己翻一眼最保险。）');
+            report(`  ⚠️ 疑似从第 ${ra.第几条} 条开始暴走（前面平均 ${ra.基线} 字/条）。`);
+          }
+          R.push('');
+          await sleep(200);
+        }
+
+        R.push('── 怎么读这些文件 ──');
+        R.push('  文件名里的「第 A-B 条」就是这一包装的是第几条到第几条。');
+        R.push('  .md 是能直接读的正文；.json 是同一批消息的原文备份（勾了才有）。');
+        R.push('  如果上面写了「疑似从第 N 条开始暴走」，先看 N 之前的那几包。');
+        R.push('');
+        R.push('── 为什么要拆 ──');
+        R.push('  聊天时模型有时会停不下来，一直生成新正文（每次内容都不一样，不是复读）。');
+        R.push('  当时不一定看得出来，只觉得「这次输出好久没结束」。');
+        R.push('  于是一段对话能堆到几千万字 —— 整段导会把浏览器直接撑爆。');
+        R.push('  这条路边抓边出文件，所以多大都导得出来。**内容一个字没删。**');
+        download(`mufy_${stem}_${ts4}_拆包报告.txt`, R.join('\n'));
+
+        report(`拆完了：${segs.size} 段，共产出 ${出了几个文件 + 1} 个文件（含一份拆包报告）。`);
+        report('   ⚠️ 文件多，浏览器可能拦掉后面的自动下载——面板底部「⬇ 手动保存」能补存最近几个。');
+        reportFinish(report);
+        return;
+      }
+
+      // 体检：只查状态、不导内容。下面那套「收集 → 打包」它一样都用不上，走完就结束。
+      if (scope === 'check') {
+        const cs = $('mufyx-checkscope').value;
+        const fsel = $('mufyx-folder');
+        // 收藏夹只筛「已关注」那一半；只查聊过的时候它没有意义，这里直接置空，
+        // 免得报告抬头写着一个根本没起作用的夹名。
+        const folderId = cs === 'chatted' ? '' : fsel.value;
+        const folderLabel = folderId ? ((fsel.options[fsel.selectedIndex] || {}).text || '') : '';
+        const scopeLabel = cs === 'merged' ? '收藏的 ＋ 聊过的（合并去重）'
+          : cs === 'followed' ? '只查收藏的' : '只查聊过的';
+        const notes = [];
+        let truncatedAny = false;
+        let folderShort = '';       // 「夹说有几个、实际给回几个」的那段话，判空时还要用
+        let folderSaid = 0;
+        const byId = new Map();
+
+        if (cs === 'merged' || cs === 'followed') {
+          let rows;
+          if (folderId) {
+            // 收藏夹走的是另一个接口（query_session 不认夹），见 getFolderCharacters
+            report(`读取收藏夹「${folderLabel}」里的角色…`);
+            const fc = await getFolderCharacters(folderId);
+            rows = fc.list;
+            report(`  收藏夹里：${rows.length} 个`);
+            if (fc.missing > 0) {
+              // 「说有 6 个、给回 0 个」—— 差额是这个夹里已经没了的角色，必须当场喊
+              folderShort = folderShortfallNote(fc.name || folderLabel, fc.said, rows.length);
+              folderSaid = fc.said;
+              report('🔴 ' + folderShort);
+              notes.push(folderShort);
+            }
+            // 这个接口不给 lastInteracted，只查收藏时报告里就没有「最后互动」那一行。
+            // 说一声，免得有人以为是记录坏了。
+            if (cs === 'followed') {
+              notes.push('按收藏夹查时，报告里没有「最后互动」那一行 —— 收藏夹接口不返回这个字段，'
+                + '不是记录出了问题。想要它就把「体检哪些角色」换成「收藏的 ＋ 聊过的」。');
+            }
+          } else {
+            report('读取已关注角色列表…');
+            rows = await getCharacterList(true);
+            if (listTruncated) truncatedAny = true;
+            report(`  已关注：${rows.length} 个`);
+          }
+          for (const c of rows) {
+            if (c.characterId) byId.set(c.characterId, Object.assign({}, c, { followed: true, chatted: false }));
+          }
+        }
+        if (cs === 'merged' || cs === 'chatted') {
+          report('读取聊过的角色列表…');
+          const g2 = await getCharacterList(false);
+          if (listTruncated) truncatedAny = true;
+          for (const c of g2) {
+            if (!c.characterId) continue;
+            const cur = byId.get(c.characterId);
+            if (cur) {
+              // 两份列表里都有 ＝ 收藏了、也聊过。
+              // ⚠️ 「已关注」那一半可能没带 lastSessionId（关注了没聊过就没有），
+              //    而「聊过的」那一半一定有 —— 缺什么补什么，别整条覆盖掉。
+              cur.chatted = true;
+              if (!cur.lastSessionId && c.lastSessionId) cur.lastSessionId = c.lastSessionId;
+              if (!cur.lastInteracted && c.lastInteracted) cur.lastInteracted = c.lastInteracted;
+            } else {
+              byId.set(c.characterId, Object.assign({}, c, { followed: false, chatted: true }));
+            }
+          }
+          report(`  聊过的：${g2.length} 个`);
+        }
+
+        const chars = Array.from(byId.values());
+        if (!chars.length) {
+          // 🔴 「夹里一个都取不回来」和「夹是空的」是两回事，说法必须分开：
+          //    前者是**这些角色已经没了**（mufy 连名字都不给），后者只是你还没往里放东西。
+          //    笼统一句「一个角色都没有」会把前者说成后者 —— 而前者恰恰是最要紧的答案。
+          if (folderShort) {
+            report('🔴 ' + folderShort);
+            throw new Error(`收藏夹「${folderLabel}」里的角色**一个都取不回来**：`
+              + `mufy 说有 ${folderSaid} 个，实际给回 0 个 —— 它们已经下架或被作者设为私密了。`
+              + `上面那段红字写了这是怎么回事、以及怎么把聊天记录救回来。`);
+          }
+          throw new Error(folderId
+            ? `收藏夹「${folderLabel}」是空的（夹里一个角色都没有）。`
+            : '这个范围里一个角色都没有。');
+        }
+        if (truncatedAny) {
+          const w = `角色多到撞上了脚本的分页上限（${LIST_MAX_PAGES} 页 × ${LIST_PAGE_SIZE}`
+            + ` ＝ ${LIST_MAX_PAGES * LIST_PAGE_SIZE} 个），后面的角色这次没读到，不在这份报告里。`;
+          report('🔴 ' + w);
+          report('   这是脚本自己的防失控上限，不是 mufy 的限制。请把这件事报给我们，我们把上限调高。');
+          notes.push(w);
+        }
+        report(`去重后 ${chars.length} 个角色。每个角色 1～3 个请求，全程只读。`);
+
+        let startAt = Math.max(1, parseInt($('mufyx-start').value, 10) || 1);
+        if (startAt > chars.length) {
+          throw new Error(`「从第 ${startAt} 个开始」超出范围：这次一共只有 ${chars.length} 个角色。`);
+        }
+        if (startAt > 1) {
+          report(`共 ${chars.length} 个，从第 ${startAt} 个开始 → 本次体检 ${chars.length - startAt + 1} 个。`);
+          report('   （顺序按「最近聊过」排，中途去聊天会让编号变化。）');
+          notes.push(`这次是从第 ${startAt} 个开始体检的，前面 ${startAt - 1} 个不在这份报告里。`);
+        }
+        const willDo = chars.length - startAt + 1;
+        if (willDo > 50 && !confirm(`要体检 ${willDo} 个角色，会跑一会儿（只查状态，不导出内容）。继续吗？`)) {
+          throw new Error('已取消。');
+        }
+
+        // 🔴 报告要出，哪怕中途停了 —— 跑了半天的结果不能跟着一个错误一起没。
+        //    （掉登录会从 checkAll 里抛上来，那时候 rows 里已经攒着几百条了。）
+        const rows = [];
+        let broke = null;
+        try {
+          await checkAll(chars, report, startAt, rows);
+        } catch (e) {
+          broke = e;
+          report('❌ 体检中断：' + e.message);
+          report('   已经查到的这些照样出报告，不会白跑。');
+        }
+        if (!rows.length) throw (broke || new Error('一个角色都没查成。'));
+
+        const stoppedAt = startAt - 1 + rows.length;
+        if (stoppedAt < chars.length) {
+          const w = `只体检到第 ${stoppedAt} 个（共 ${chars.length} 个）——`
+            + `下次把「从第几个角色开始」填 ${stoppedAt + 1} 接着跑，前面的不用重来。`;
+          report('⏸ ' + w);
+          notes.push(w);
+        }
+
+        // 这三条和这一轮跑得怎么样无关，但少了任何一条，名单都会被读错
+        notes.push('**被作者设为私密的角色不在这份报告里。** mufy 会把它从你的「已关注」和「聊过的」'
+          + '两份列表里一起摘掉，而体检能枚举的只有这两份列表，所以它压根不会出现。\n'
+          + '  想找回它们：浏览器按 Ctrl+H 打开历史记录、搜 roleId，把聊天页地址整条粘进脚本范围里的'
+          + '「救回卡已消失的角色」。⏳ 历史一般只留 90 天，要救趁早。');
+        notes.push('**「一条记录都不剩了」不一定等于真的没了。** 没有会员时，过期的历史存档在 mufy 那边'
+          + '就看不到、接口也不返回 —— 脚本拿不到，这里就会显示成空的。续上会员再体检一次，'
+          + '数字可能会变回来。');
+        notes.push('体检全程只读：没有改动、删除、取关任何东西。');
+
+        const text = buildCheckReport(rows, { scopeLabel, folderLabel, notes });
+        const ts3 = stamp();
+        download(`mufy_体检_${ts3}.txt`, text);
+        if (opts.json) {
+          download(`mufy_体检_${ts3}.json`, JSON.stringify({
+            version: VERSION,
+            exportTime: new Date().toISOString(),
+            scope: cs,
+            scopeLabel,
+            folder: folderLabel || '全部',
+            notes,
+            rows,
+          }, null, 2));
+        }
+
+        // 结尾把账再算一遍：日志会被几百行冲走，但结尾这几行是她最后看到的
+        report('');
+        for (const [key, icon, label] of CHECK_BUCKETS) {
+          const cnt = rows.filter((r) => bucketOf(r) === key).length;
+          if (cnt) report(`${icon} ${label}：${cnt}`);
+        }
+        const tgt = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
+        if (tgt.length) report(`🎯 其中「未收藏 ＋ 一条记录都不剩」的有 ${tgt.length} 个，报告里列了名单。`);
+        report('⚠️ 被作者设为私密的角色查不到（mufy 把它从列表里摘掉了）——报告开头写了怎么救。');
+        reportFinish(report);
+        return;
+      }
+
       let ids = []; // [{ id, live }]
       if (scope === 'current' || scope === 'live') {
         const rid = qs('roleId');
@@ -2768,8 +3643,27 @@ ${ncxpts.join('\n')}
         ids = [{ id: v, live: null }];
       } else {
         const followedOnly = scope === 'followed';
-        report(followedOnly ? '读取已关注角色列表…' : '读取聊过的角色列表…');
-        const chars = await getCharacterList(followedOnly);
+        // 收藏夹只筛「已关注」那一半：「聊过的角色」不挂在收藏夹底下，选了也不起作用，
+        // 所以这里干脆不读它 —— 免得面板上选着一个夹、导出来的却是全部。
+        const fsel = $('mufyx-folder');
+        const exFolderId = followedOnly ? fsel.value : '';
+        const exFolderName = exFolderId ? ((fsel.options[fsel.selectedIndex] || {}).text || '') : '';
+        report(followedOnly
+          ? (exFolderId ? `读取收藏夹「${exFolderName}」里的角色…` : '读取已关注角色列表…')
+          : '读取聊过的角色列表…');
+        let chars;
+        if (followedOnly && exFolderId) {
+          // 收藏夹走的是另一个接口（query_session 不认夹），见 getFolderCharacters
+          const fc = await getFolderCharacters(exFolderId);
+          chars = fc.list;
+          listTruncated = false;
+          if (fc.missing > 0) {
+            report('🔴 ' + folderShortfallNote(fc.name || exFolderName, fc.said, chars.length));
+            report('   这几个不在这次导出的名单里 —— 名字都拿不到，够不着。');
+          }
+        } else {
+          chars = await getCharacterList(followedOnly);
+        }
         // 撞到分页上限必须当场喊 —— 少拿了却不说，等于骗人
         if (listTruncated) {
           report(`🔴 角色多到超过了脚本的分页上限（${LIST_MAX_PAGES} 页 × ${LIST_PAGE_SIZE} ＝ `
@@ -2809,7 +3703,15 @@ ${ncxpts.join('\n')}
         // 「你最后一次跟它互动是哪天」——那是区分「没聊过」和「记录没了」的唯一凭据
         ids = usable.filter((c) => c.characterId)
           .map((c) => ({ id: c.characterId, live: c.lastSessionId, name: c.name, interacted: c.lastInteracted }));
-        if (!ids.length) throw new Error('没有可导出的角色。');
+        if (!ids.length) {
+          // 收藏夹整夹取不回来时，别只说「没有可导出的角色」—— 原因上面已经知道了
+          if (followedOnly && exFolderId) {
+            throw new Error(`收藏夹「${exFolderName}」里没有可导出的角色。`
+              + `如果上面报了「说有 N 个、实际只给回 M 个」，那就是这些角色已经下架或被设为私密 ——`
+              + `连名字都拿不到，只能走范围里的「救回卡已消失的角色」。`);
+          }
+          throw new Error('没有可导出的角色。');
+        }
         const unit = shape === 'epub' ? '一本电子书' : shape === 'one' ? '一份 Markdown'
           : shape === 'tavern' ? '一包酒馆对话' : '一个压缩包';
         if (!confirm(`要导出 ${ids.length} 个角色，每个角色${unit}，会跑很久。继续吗？`)) {
@@ -2919,10 +3821,14 @@ ${ncxpts.join('\n')}
           report(`❌ [${seq}/${totalIds}] 【${t.name || t.id}】失败：${e.message}`);
           // 「Invalid string length」不是网络问题，是这个角色大到超过了 JS 单个字符串的上限。
           // 甩一句英文报错没用，直接告诉她怎么办。
-          if (/Invalid string length|string length|RangeError/i.test(e.message)) {
+          if (/单独这一段/.test(e.message)) {
+            // 上面已经把话说全了，这里再补一句会更乱
+          } else if (/Invalid string length|string length|RangeError/i.test(e.message)) {
             report('   ↳ 这个角色太大了（超过 JS 单个字符串的上限），不是网络问题。');
             report('     把面板上「每包最多多少段对话」填 20 再导一次，通常就过了；');
             report('     还不行就填 10，或者先取消勾选「附带 JSON 完整备份」。');
+            report('     ⚠️ 如果填到 1 还是不行，那就不是「段多」而是**某一段自己太大**——');
+            report('     分包对那种没有用，见 README「一段太大导不出来」那节。');
           } else if (/out of memory|Array buffer allocation|allocation failed/i.test(e.message)) {
             report('   ↳ 内存不够。同样：把「每包最多多少段对话」填 20 再试。');
           }
@@ -2994,10 +3900,15 @@ ${ncxpts.join('\n')}
   window.__mufyExporter = {
     open, collectCharacter, toMarkdown, toMarkdownOne, emit,
     getArchives, getDialogs, getCharacterList, hasChatted,
+    // 体检那条路：buildCheckReport 是纯函数（rows 进、文本出），
+    // 拿假 rows 就能在控制台直接验分组和结论，不用真去跑几百个角色。
+    getFolders, getFolderCharacters, folderShortfallNote,
+    checkOne, checkAll, buildCheckReport, bucketOf, CHECK_BUCKETS,
     getMasks, maskToMarkdown, emitMasks, maskTitle,
     getMyCards, cardToMarkdown, emitCards, cardRoles, cardAdversity, fetchCardImages,
     ensureToken, refreshToken, api, makeZip,
     parseRescueInput, collectBySessions,   // 救援那条路，挂出来才验得了
+    streamSessionParts, partToMarkdown, guessRunawayStart,   // 拆开导那条路
     downloadBlob, renderRecent, recentFiles, setLogSink: (f) => { logSink = f; },
     contentToText, tidy, sessionToTavern,
     // 下面这几个是给自测用的：EPUB 那条路是纯函数（pack 进、书出），
