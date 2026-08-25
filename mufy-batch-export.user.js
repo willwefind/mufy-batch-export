@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.49.0
+// @version      1.50.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来；还能给全部角色做一次「体检」，一次性查出哪些卡没了、哪些记录空了
 // @author       Ciel
 // @license      AGPL-3.0-only
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.49.0';
+  const VERSION = '1.50.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -1012,17 +1012,25 @@
     ],
     empty: [
       '这些是**卡还在、但 mufy 那边一段存档都没有、最后聊的那段也一条不剩**。',
+      '🔑 **卡还在，就还有得救的部分**：现在去收藏它、或者随手聊一条，入口就保住了。',
       '⚠️ 先别急着当成丢了：没有会员时，过期的历史存档在 mufy 那边就看不到、接口也不返回，',
       '   在这儿同样会显示成空的。续上会员再体检一次，数字可能就变回来了。',
       '如果本来就没有会员这回事，那多半是真的空了 —— 服务器上没有的东西，脚本也变不出来。',
     ],
     never: [
-      '关注了但从没聊过，所以没有任何对话记录。**但开场白还挂在卡上**（常有一两千字）。',
-      '想把开场白留下来：范围选「全部已关注角色」，勾上「连没聊过的也导」。',
-      '⏳ 卡还在才拿得到 —— 作者一旦删卡或设为私密，开场白也跟着没了。',
+      '关注了但从没聊过，所以没有任何对话记录 —— **这批是正常的，不是出了问题**。',
+      '卡是公开卡的话，从你的收藏里照样点得进去，什么时候想聊都行。',
+      '**开场白还挂在卡上**（常有一两千字）。想留下来：范围选「全部已关注角色」，',
+      '勾上「连没聊过的也导」。⏳ 卡还在才拿得到 —— 作者一旦删卡或设为私密，开场白也跟着没。',
     ],
+    // 🔴 这一栏原来写的是「多半是网络抖动，不代表角色有问题」——**那句话是错的**。
+    //    2026-08-25 clover 实测：她这一栏里 23 个全是 HTTP 503，而**那些卡在 mufy 网页上
+    //    同样打不开**（她原话："目前收藏里已经打不开的卡"）。
+    //    所以 503 不能一律说成"你网络抖了"。但也不能反过来直接判成「卡没了」——
+    //    503 本来就是服务端临时故障的标准码，硬判会冤枉真抖动的那些。
+    //    ⇒ 照实说两种可能，并给一个**用户自己能分辨**的判据：重跑一次。
     error: [
-      '这几个这次没查出来，多半是网络抖动，不代表角色有问题。',
+      '这一栏是「**这次没查出来**」，不是「这个角色有问题」。',
       '救法：把「从第几个角色开始」填上它的序号再体检一次，前面的不用重跑。',
     ],
     ok: [],
@@ -1070,6 +1078,9 @@
     } catch (e) {
       if (/续不上登录态/.test(e.message)) throw e;
       const msg = e.message || String(e);
+      // 状态码要留着：503 和「网络断了」后果完全不同，报告里得分开说（见 CHECK_ADVICE.error）
+      const code = /HTTP (\d{3})/.exec(msg);
+      row.httpStatus = code ? Number(code[1]) : 0;
       if (/HTTP (404|500)|not found/i.test(msg)) {
         // 实测：作者删了卡之后这个接口就是 500（本仓 collectCharacter 上面那段有记录）。
         // 它还在你的列表里 ⇒ 是删卡，不是设私密。
@@ -1174,6 +1185,20 @@
       if (!list.length) continue;
       L.push(`── ${icon} ${label}（${list.length} 个）──`);
       for (const a of (CHECK_ADVICE[key] || [])) L.push('  ' + a);
+      // 🔴 503 必须单独说：它和「网络断了」长得像，后果完全不同（见 CHECK_ADVICE.error 上面那段）
+      if (key === 'error') {
+        const n503 = list.filter((r) => r.httpStatus === 503).length;
+        if (n503) {
+          L.push('');
+          L.push(`  🔴 其中 ${n503} 个是 HTTP 503，这个要单独说。`);
+          L.push('     503 本来是「服务端临时故障」的标准码，所以看着像网络问题。');
+          L.push('     **但有用户实测：她这一栏里的 503，那些卡在 mufy 网页上同样打不开。**');
+          L.push('     也就是说 503 有两种可能，一种是真抖动，一种是这张卡现在就是拿不到。');
+          L.push('     👉 **分辨办法：过一会儿重跑一次。** 真抖动会变正常；');
+          L.push('        还是 503 的，基本可以当成这张卡已经不可用了。');
+          L.push('     ⚠️ 卡不可用 ≠ 你的聊天记录没了。记录挂在你自己账号下，照常导得出来。');
+        }
+      }
       if ((CHECK_ADVICE[key] || []).length) L.push('');
       for (const r of list) {
         L.push(`  ${r.followed ? '⭐已收藏' : '○未收藏'}　${r.name}`);
@@ -1223,20 +1248,50 @@
       const target = rows.filter((r) => bucketOf(r) === 'empty' && !r.followed);
       if (target.length) {
         L.push(`── 🎯 未收藏 ＋ 一条记录都不剩（${target.length} 个）──`);
-        L.push('  这批已经晚了：你聊过它，没收藏，现在记录也不剩了。');
-        L.push('  收藏并不会把记录变回来 —— 上面那栏 💛 才是还来得及的。');
+        L.push('  你聊过它、没收藏，现在记录也不剩了 —— **记录是救不回来了**。');
+        L.push('  🔑 **但卡还在。** 现在去收藏它、或者随手聊一条，入口就保住了；');
+        L.push('     不然哪天它下架或被作者设为私密，你连"我聊过这个人"这件事都再也查不到。');
+        L.push('     （上面那栏 💛 是记录也还在的，那批更值得先去收藏。）');
         L.push('');
         for (const r of target) L.push(`  ○ ${r.name}　${r.characterId}`);
         L.push('');
       }
     }
 
+    // 🔑 clover 提的：报告里每一行都印了角色ID，可那串东西怎么用、能干什么，
+    //    报告自己一个字都没说 —— 等于把最有用的东西白给了又收回去。
+    //    平时 roleId 极难拿到（页面标题全是站名，网址里也只有 ID），
+    //    而这份报告一次给你几百个。
+    L.push('── 🔑 上面那些「角色ID」怎么用 ──');
+    L.push('  每一行后面印的角色ID（roleId），就是这个角色在 mufy 上的门牌号。');
+    L.push('  平时它很难拿到，而这份报告一次给了你全部 —— 有了它，不用求人也能把角色打开：');
+    L.push('');
+    L.push('    1. 在 mufy 里随便打开一个你还进得去的角色的聊天页；');
+    L.push('    2. 看地址栏，里面有一段 roleId=xxxxxxxx-xxxx-xxxx-…；');
+    L.push('    3. 把 roleId= 后面那一整串，换成你想找的那个角色的 ID，回车。');
+    L.push('');
+    L.push('  ✅ 只要那张卡还在（公开卡、或者你聊过它），基本都打得开 ——');
+    L.push('     哪怕它已经从你的收藏、最近聊天列表里都翻不到了。');
+    L.push('     几个月前聊过、现在怎么翻都翻不着的角色，用这一招最省事。');
+    L.push('  ❌ 打不开的两种：作者把卡设为私密了；或者那是「仅链接可见」而你从没聊过的卡。');
+    L.push('');
+    L.push('  ⚠️ 地址里 sessionId= 后面那串是**你和它那一段对话**的编号，属于你个人。');
+    L.push('     要把地址发给别人之前，先把 sessionId 那一段删掉');
+    L.push('     （roleId 是全站共用的，公开无妨；sessionId 不是）。');
+    L.push('');
+
     L.push('── 这份报告是怎么判的 ──');
     L.push('  ✅ 正常　　＝ 卡还在，且（有存档 或 「最后聊的那一段」里还有内容）');
-    L.push('  🔒 卡取不到＝ characters/get 取不到这张卡；它还在你的列表里，所以是作者删了卡');
-    L.push('  💬 一条不剩＝ 卡还在，但存档 0 段、「最后聊的那一段」也 0 条');
-    L.push('  📭 从没聊过＝ 没有存档，也没有「最后聊的那一段」');
-    L.push('  ❓ 没查出来＝ 这次请求失败了（网络抖动居多），不代表这个角色有问题');
+    L.push('  🔒 卡取不到＝ 接口**明确答复「没有这张卡」**（HTTP 404 / 500）。');
+    L.push('               它还在你的列表里，所以是作者删了卡 ——');
+    L.push('               设为私密的会被整个摘出列表，压根不会出现在这份报告里。');
+    L.push('  💬 一条不剩＝ 卡还在，但存档 0 段、「最后聊的那一段」也 0 条。');
+    L.push('               卡还在就还有得救：去收藏或随手聊一条，入口能保住。');
+    L.push('  📭 从没聊过＝ 没有存档，也没有「最后聊的那一段」。**这批是正常的**，');
+    L.push('               公开卡从收藏里照样点得进去，只是你还没开聊。');
+    L.push('  ❓ 没查出来＝ 这次请求没成功。**别一律当成网络抖动**：');
+    L.push('               其中的 HTTP 503 有实测案例是「这张卡现在就是打不开」，');
+    L.push('               过一会儿重跑一次就能分辨（真抖动会变正常）。');
     L.push('');
     L.push('  ⚠️ 只看「最后聊的那一段」是判不出空不空的 —— 存档是另一套东西，');
     L.push('     完全可能存档满满而最后那段是空的。所以这里两边都查，都空才算空。');
@@ -2953,6 +3008,10 @@ ${ncxpts.join('\n')}
         <select id="mufyx-folder"><option value="">全部收藏夹</option></select>
       </label>
       <div id="mufyx-foldertip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0"></div>
+      <div id="mufyx-scopelock" style="display:none;font-size:11.5px;color:#ffd479;margin:2px 0 0">
+        🔒 <b>选了收藏夹，这一轮就只查这个夹里的角色</b> —— 上面那个「体检哪些角色」这次不起作用。
+        想查全部，把收藏夹选回「全部收藏夹」。
+      </div>
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
@@ -3125,6 +3184,11 @@ ${ncxpts.join('\n')}
       $('mufyx-folderwrap').style.display = wantFolder ? 'block' : 'none';
       $('mufyx-foldertip').style.display = wantFolder ? 'block' : 'none';
       if (wantFolder) loadFolders();
+      // 选了具体的夹 ＝ 范围已经定死了，把「体检哪些角色」锁掉并说明白，
+      // 别让人以为两个选项还在叠加（v1.49 就是那样，夹等于没选）
+      const folderPicked = isCheck && wantFolder && !!$('mufyx-folder').value;
+      $('mufyx-checkscope').disabled = folderPicked;
+      $('mufyx-scopelock').style.display = folderPicked ? 'block' : 'none';
 
       // 分批只对聊天记录有意义（面具/角色卡不是按段组织的；体检根本不产出内容）
       $('mufyx-chunkwrap').style.display = (other || isCheck || isSplit) ? 'none' : 'block';
@@ -3175,6 +3239,7 @@ ${ncxpts.join('\n')}
     $('mufyx-scope').onchange = syncUI;
     $('mufyx-shape').onchange = syncUI;
     $('mufyx-checkscope').onchange = syncUI;
+    $('mufyx-folder').onchange = syncUI;   // 选中/取消收藏夹要立刻把上面那个锁上/放开
     $('mufyx-go').onclick = () => run(panel);
   }
 
@@ -3507,7 +3572,14 @@ ${ncxpts.join('\n')}
         // 免得报告抬头写着一个根本没起作用的夹名。
         const folderId = cs === 'chatted' ? '' : fsel.value;
         const folderLabel = folderId ? ((fsel.options[fsel.selectedIndex] || {}).text || '') : '';
-        const scopeLabel = cs === 'merged' ? '收藏的 ＋ 聊过的（合并去重）'
+        // 🔴 选了收藏夹，名单就**严格等于这个夹**，不管上面「体检哪些角色」选的是什么。
+        //    v1.49 及以前不是这样：收藏夹只筛得动「已关注」那一半，而默认范围里
+        //    「聊过的」那一半是不带筛选的整份列表，两边一合并，**夹就等于没选** ——
+        //    clover 实测：夹里 20 个点完之后，脚本接着把她其余的收藏也点了一遍。
+        //    「某个夹 ＋ 全部聊过的」这个组合没有任何人想要，所以让夹赢，并当场说清楚。
+        const folderStrict = !!folderId;
+        const scopeLabel = folderStrict ? `只查收藏夹「${folderLabel}」里的角色`
+          : cs === 'merged' ? '收藏的 ＋ 聊过的（合并去重）'
           : cs === 'followed' ? '只查收藏的' : '只查聊过的';
         const notes = [];
         let truncatedAny = false;
@@ -3515,14 +3587,14 @@ ${ncxpts.join('\n')}
         let folderSaid = 0;
         const byId = new Map();
 
-        if (cs === 'merged' || cs === 'followed') {
+        if (folderStrict || cs === 'merged' || cs === 'followed') {
           let rows;
           if (folderId) {
             // 收藏夹走的是另一个接口（query_session 不认夹），见 getFolderCharacters
             report(`读取收藏夹「${folderLabel}」里的角色…`);
             const fc = await getFolderCharacters(folderId);
             rows = fc.list;
-            report(`  收藏夹里：${rows.length} 个`);
+            report(`  收藏夹里：${rows.length} 个 —— 这一轮只查这些。`);
             if (fc.missing > 0) {
               // 「说有 6 个、给回 0 个」—— 差额是这个夹里已经没了的角色，必须当场喊
               folderShort = folderShortfallNote(fc.name || folderLabel, fc.said, rows.length);
@@ -3530,12 +3602,8 @@ ${ncxpts.join('\n')}
               report('🔴 ' + folderShort);
               notes.push(folderShort);
             }
-            // 这个接口不给 lastInteracted，只查收藏时报告里就没有「最后互动」那一行。
-            // 说一声，免得有人以为是记录坏了。
-            if (cs === 'followed') {
-              notes.push('按收藏夹查时，报告里没有「最后互动」那一行 —— 收藏夹接口不返回这个字段，'
-                + '不是记录出了问题。想要它就把「体检哪些角色」换成「收藏的 ＋ 聊过的」。');
-            }
+            notes.push(`这一轮**只查了收藏夹「${folderLabel}」里的 ${rows.length} 个角色**，`
+              + '你其余的收藏和聊过的角色都不在这份报告里 —— 想查全部，把「收藏夹」选回「全部收藏夹」。');
           } else {
             report('读取已关注角色列表…');
             rows = await getCharacterList(true);
@@ -3546,7 +3614,22 @@ ${ncxpts.join('\n')}
             if (c.characterId) byId.set(c.characterId, Object.assign({}, c, { followed: true, chatted: false }));
           }
         }
-        if (cs === 'merged' || cs === 'chatted') {
+        // 选了夹的时候也读一遍「聊过的」，但**只用来补字段，绝不往名单里加人**：
+        // 收藏夹接口不给 lastInteracted，而这份列表给 —— 补上了报告里才有「最后互动」。
+        if (folderStrict) {
+          report('读取聊过的角色列表（只用来补「最后互动」，不会加人）…');
+          const g3 = await getCharacterList(false);
+          let 补到 = 0;
+          for (const c of g3) {
+            const cur = c.characterId && byId.get(c.characterId);
+            if (!cur) continue;                       // 🔑 不在夹里的一律不收
+            cur.chatted = true;
+            if (!cur.lastSessionId && c.lastSessionId) cur.lastSessionId = c.lastSessionId;
+            if (!cur.lastInteracted && c.lastInteracted) cur.lastInteracted = c.lastInteracted;
+            补到 += 1;
+          }
+          report(`  其中 ${补到} 个在「聊过的」列表里，已补上最后互动时间。`);
+        } else if (cs === 'merged' || cs === 'chatted') {
           report('读取聊过的角色列表…');
           const g2 = await getCharacterList(false);
           if (listTruncated) truncatedAny = true;
@@ -3636,8 +3719,9 @@ ${ncxpts.join('\n')}
           + '数字可能会变回来。');
         notes.push('体检全程只读：没有改动、删除、取关任何东西。');
 
-        // 只查聊过的时候没读「已关注」列表 —— 收藏状态是不知道的，别让报告去猜
-        const followKnown = cs !== 'chatted';
+        // 只查聊过的时候没读「已关注」列表 —— 收藏状态是不知道的，别让报告去猜。
+        // 选了收藏夹则相反：名单整个来自收藏夹，每一个都必然是收藏过的。
+        const followKnown = folderStrict || cs !== 'chatted';
         const text = buildCheckReport(rows, { scopeLabel, folderLabel, notes, followKnown });
         const ts3 = stamp();
         download(`mufy_体检_${ts3}.txt`, text);
