@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.50.0
+// @version      1.51.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来；还能给全部角色做一次「体检」，一次性查出哪些卡没了、哪些记录空了
 // @author       Ciel
 // @license      AGPL-3.0-only
@@ -36,7 +36,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.50.0';
+  const VERSION = '1.51.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -3008,10 +3008,7 @@ ${ncxpts.join('\n')}
         <select id="mufyx-folder"><option value="">全部收藏夹</option></select>
       </label>
       <div id="mufyx-foldertip" style="display:none;font-size:11.5px;color:#a79ecb;margin:2px 0 0"></div>
-      <div id="mufyx-scopelock" style="display:none;font-size:11.5px;color:#ffd479;margin:2px 0 0">
-        🔒 <b>选了收藏夹，这一轮就只查这个夹里的角色</b> —— 上面那个「体检哪些角色」这次不起作用。
-        想查全部，把收藏夹选回「全部收藏夹」。
-      </div>
+      <div id="mufyx-scopelock" style="display:none;font-size:11.5px;color:#ffd479;margin:2px 0 0"></div>
       <label id="mufyx-idwrap" style="display:none">角色 ID
         <input type="text" id="mufyx-id" placeholder="地址栏 roleId= 后面那串">
       </label>
@@ -3184,11 +3181,28 @@ ${ncxpts.join('\n')}
       $('mufyx-folderwrap').style.display = wantFolder ? 'block' : 'none';
       $('mufyx-foldertip').style.display = wantFolder ? 'block' : 'none';
       if (wantFolder) loadFolders();
-      // 选了具体的夹 ＝ 范围已经定死了，把「体检哪些角色」锁掉并说明白，
-      // 别让人以为两个选项还在叠加（v1.49 就是那样，夹等于没选）
+      // 🔴 选了夹之后，「体检哪些角色」那两项的**含义变了**，所以把文案改掉。
+      //    不锁死 —— 两种范围都有人要（只清点这个夹 / 顺带找出聊过但没收藏的），
+      //    该做的是让人一眼看懂自己选的是哪种，而不是替他决定。
       const folderPicked = isCheck && wantFolder && !!$('mufyx-folder').value;
-      $('mufyx-checkscope').disabled = folderPicked;
-      $('mufyx-scopelock').style.display = folderPicked ? 'block' : 'none';
+      const csSel = $('mufyx-checkscope');
+      csSel.disabled = false;
+      const optM = csSel.querySelector('option[value=merged]');
+      const optF = csSel.querySelector('option[value=followed]');
+      optM.textContent = folderPicked ? '这个收藏夹 ＋ 聊过的全部（能顺带找出「聊过了但还没收藏」）'
+        : '收藏的 ＋ 聊过的（推荐，最全，也最慢）';
+      optF.textContent = folderPicked ? '只查这个收藏夹里的（最快）' : '只查收藏的';
+      const lock = $('mufyx-scopelock');
+      lock.style.display = folderPicked ? 'block' : 'none';
+      if (folderPicked) {
+        lock.innerHTML = csSel.value === 'merged'
+          ? '这一轮会查<b>这个夹 ＋ 你聊过的全部角色</b>（比只查夹慢很多）。'
+            + '好处是能顺带找出「聊过了但还没收藏」的那批。<br>'
+            + '只想清点这个夹，就把上面换成「<b>只查这个收藏夹里的</b>」。'
+          : '这一轮<b>只查这个夹里的角色</b>，你其余的收藏和聊过的角色都不查。<br>'
+            + '⚠️ 夹里的角色本来就都是收藏过的，所以这种范围下'
+            + '<b>找不出「聊过了但还没收藏」</b>——要那个就换成上面那项。';
+      }
 
       // 分批只对聊天记录有意义（面具/角色卡不是按段组织的；体检根本不产出内容）
       $('mufyx-chunkwrap').style.display = (other || isCheck || isSplit) ? 'none' : 'block';
@@ -3239,7 +3253,14 @@ ${ncxpts.join('\n')}
     $('mufyx-scope').onchange = syncUI;
     $('mufyx-shape').onchange = syncUI;
     $('mufyx-checkscope').onchange = syncUI;
-    $('mufyx-folder').onchange = syncUI;   // 选中/取消收藏夹要立刻把上面那个锁上/放开
+    // 选中一个夹时，默认切到「只查这个收藏夹里的」——十有八九是这个意思（clover 就是）。
+    // 但**不锁**：选项还能改，改了上面那段说明会跟着变。
+    $('mufyx-folder').onchange = () => {
+      if ($('mufyx-folder').value && $('mufyx-checkscope').value === 'merged') {
+        $('mufyx-checkscope').value = 'followed';
+      }
+      syncUI();
+    };
     $('mufyx-go').onclick = () => run(panel);
   }
 
@@ -3572,13 +3593,19 @@ ${ncxpts.join('\n')}
         // 免得报告抬头写着一个根本没起作用的夹名。
         const folderId = cs === 'chatted' ? '' : fsel.value;
         const folderLabel = folderId ? ((fsel.options[fsel.selectedIndex] || {}).text || '') : '';
-        // 🔴 选了收藏夹，名单就**严格等于这个夹**，不管上面「体检哪些角色」选的是什么。
-        //    v1.49 及以前不是这样：收藏夹只筛得动「已关注」那一半，而默认范围里
-        //    「聊过的」那一半是不带筛选的整份列表，两边一合并，**夹就等于没选** ——
-        //    clover 实测：夹里 20 个点完之后，脚本接着把她其余的收藏也点了一遍。
-        //    「某个夹 ＋ 全部聊过的」这个组合没有任何人想要，所以让夹赢，并当场说清楚。
-        const folderStrict = !!folderId;
-        const scopeLabel = folderStrict ? `只查收藏夹「${folderLabel}」里的角色`
+        // 选了收藏夹之后，范围**由用户决定**，面板上两个选项写得明明白白：
+        //   · 「只查这个收藏夹里的」  → folderStrict：名单严格等于这个夹
+        //   · 「这个收藏夹 ＋ 聊过的全部」→ 夹当作收藏那一半，再并上聊过的
+        // 🔴 v1.49 的毛病是**没得选**：夹只筛得动「已关注」那一半，而默认范围里
+        //    「聊过的」那一半不带筛选，两边一合并夹就等于没选 —— clover 实测：
+        //    夹里 20 个点完之后，脚本接着把她其余的收藏也点了一遍。
+        // 🔴 v1.50 我矫枉过正，改成「选了夹就强制只查夹」，结果把 💛 废了：
+        //    夹里的角色全都是收藏过的，「聊过了但还没收藏」永远是 0。
+        //    所以现在两种都留着，靠**选项文案**让人看得懂自己选了什么。
+        const folderStrict = !!folderId && cs !== 'merged';
+        const scopeLabel = folderId
+          ? (folderStrict ? `只查收藏夹「${folderLabel}」里的角色`
+                          : `收藏夹「${folderLabel}」 ＋ 聊过的全部（合并去重）`)
           : cs === 'merged' ? '收藏的 ＋ 聊过的（合并去重）'
           : cs === 'followed' ? '只查收藏的' : '只查聊过的';
         const notes = [];
@@ -3594,7 +3621,9 @@ ${ncxpts.join('\n')}
             report(`读取收藏夹「${folderLabel}」里的角色…`);
             const fc = await getFolderCharacters(folderId);
             rows = fc.list;
-            report(`  收藏夹里：${rows.length} 个 —— 这一轮只查这些。`);
+            report(folderStrict
+              ? `  收藏夹里：${rows.length} 个 —— 这一轮只查这些。`
+              : `  收藏夹里：${rows.length} 个 —— 待会儿还会并上你聊过的全部角色。`);
             if (fc.missing > 0) {
               // 「说有 6 个、给回 0 个」—— 差额是这个夹里已经没了的角色，必须当场喊
               folderShort = folderShortfallNote(fc.name || folderLabel, fc.said, rows.length);
@@ -3602,8 +3631,14 @@ ${ncxpts.join('\n')}
               report('🔴 ' + folderShort);
               notes.push(folderShort);
             }
-            notes.push(`这一轮**只查了收藏夹「${folderLabel}」里的 ${rows.length} 个角色**，`
-              + '你其余的收藏和聊过的角色都不在这份报告里 —— 想查全部，把「收藏夹」选回「全部收藏夹」。');
+            notes.push(folderStrict
+              ? `这一轮**只查了收藏夹「${folderLabel}」里的 ${rows.length} 个角色**，`
+                + '你其余的收藏、以及聊过但不在这个夹里的角色，都不在这份报告里。'
+                + '（想顺带找出「聊过了但还没收藏」的，把「体检哪些角色」换成'
+                + '「这个收藏夹 ＋ 聊过的全部」。）'
+              : `这一轮查的是**收藏夹「${folderLabel}」里的 ${rows.length} 个 ＋ 你聊过的全部角色**。`
+                + '你在别的夹里、或者没归夹的收藏，不在这份名单里 —— '
+                + '但「有没有收藏过」这件事是按你的**全部收藏**判的，不会只看这一个夹。');
           } else {
             report('读取已关注角色列表…');
             rows = await getCharacterList(true);
@@ -3614,7 +3649,19 @@ ${ncxpts.join('\n')}
             if (c.characterId) byId.set(c.characterId, Object.assign({}, c, { followed: true, chatted: false }));
           }
         }
-        // 选了夹的时候也读一遍「聊过的」，但**只用来补字段，绝不往名单里加人**：
+        // 🔴 「这个夹 ＋ 聊过的全部」这种组合下，名单里会混进只在「聊过的」列表里的角色。
+        //    它们到底收藏过没有，**不能只看这一个夹** —— 用户在别的夹里、或者没归夹的
+        //    收藏也是收藏。只看这个夹的话，那些人会被当成"没收藏"塞进 💛，是谎报。
+        //    所以这里额外读一遍完整的「已关注」列表，只用来定收藏状态。
+        let followedIds = null;
+        if (folderId && !folderStrict) {
+          report('读取完整的已关注列表（只用来判断「有没有收藏过」）…');
+          const af = await getCharacterList(true);
+          followedIds = new Set(af.map((c) => c.characterId).filter(Boolean));
+          report(`  你一共收藏了 ${followedIds.size} 个角色。`);
+        }
+
+        // 选了夹、且只查这个夹时，也读一遍「聊过的」，但**只补字段，绝不加人**：
         // 收藏夹接口不给 lastInteracted，而这份列表给 —— 补上了报告里才有「最后互动」。
         if (folderStrict) {
           report('读取聊过的角色列表（只用来补「最后互动」，不会加人）…');
@@ -3644,7 +3691,9 @@ ${ncxpts.join('\n')}
               if (!cur.lastSessionId && c.lastSessionId) cur.lastSessionId = c.lastSessionId;
               if (!cur.lastInteracted && c.lastInteracted) cur.lastInteracted = c.lastInteracted;
             } else {
-              byId.set(c.characterId, Object.assign({}, c, { followed: false, chatted: true }));
+              // followedIds 有值时以它为准（「夹 ＋ 聊过的」那种组合），否则沿用原来的判断
+              const isFollowed = followedIds ? followedIds.has(c.characterId) : false;
+              byId.set(c.characterId, Object.assign({}, c, { followed: isFollowed, chatted: true }));
             }
           }
           report(`  聊过的：${g2.length} 个`);
@@ -3720,7 +3769,8 @@ ${ncxpts.join('\n')}
         notes.push('体检全程只读：没有改动、删除、取关任何东西。');
 
         // 只查聊过的时候没读「已关注」列表 —— 收藏状态是不知道的，别让报告去猜。
-        // 选了收藏夹则相反：名单整个来自收藏夹，每一个都必然是收藏过的。
+        // 其余情况都知道：只查夹时名单全部来自夹（必然收藏过）；
+        // 「夹 ＋ 聊过的」时上面额外读了完整的已关注列表。
         const followKnown = folderStrict || cs !== 'chatted';
         const text = buildCheckReport(rows, { scopeLabel, folderLabel, notes, followKnown });
         const ts3 = stamp();
