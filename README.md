@@ -1,6 +1,6 @@
 # Mufy Batch Export
 
-[简体中文 / Full Chinese Guide](README.zh-CN.md)
+[简体中文](README.zh-CN.md) · [Full Chinese Guide](README.zh-CN.full.md)
 
 An open-source, privacy-conscious toolkit for **exporting, preserving, reading, and migrating your own Mufy data**.
 
@@ -79,7 +79,7 @@ Both readers are front-end only: your archive stays on your device.
 5. Click **⬇ Batch Export** in the lower-left corner.
 6. Choose what to export and the output format.
 
-For iPhone/iPad, Android, troubleshooting, recovery, huge archives, and detailed explanations of every option, see the **[full Chinese guide](README.zh-CN.md)**. It is intentionally much more detailed and written for non-technical users.
+For iPhone/iPad, Android, troubleshooting, recovery, huge archives, and detailed explanations of every option, see the **[full Chinese guide](README.zh-CN.full.md)**. It is intentionally much more detailed and written for non-technical users.
 
 ## Privacy & security model
 
@@ -122,7 +122,8 @@ The repository is still young and the target site's APIs are not under this proj
 | `make-epub.py` | Convert previously exported ZIP archives to EPUB |
 | `find-keys-in-history.py` | Local helper for finding conversation keys in browser history |
 | `find-keys-in-history.md` | Beginner-friendly guide for the history helper |
-| `README.zh-CN.md` | Full Chinese documentation and troubleshooting guide |
+| `README.zh-CN.md` | Chinese project overview with the recommended reader first |
+| `README.zh-CN.full.md` | Full Chinese documentation and troubleshooting guide |
 | `LICENSE` | AGPL-3.0 license text |
 
 ## Contributing / reporting problems
