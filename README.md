@@ -6,6 +6,8 @@ An open-source, privacy-conscious toolkit for **exporting, preserving, reading, 
 
 It started as a userscript for batch-exporting conversations and has grown into a practical archive toolkit: Markdown/JSON backups, EPUB books, SillyTavern-compatible JSONL, persona and character-card export, archive recovery tools, and a local reader.
 
+> **v1.53 — archived sessions are now restored automatically.** Mufy now clears a session's messages as soon as it is saved as an archive, so older versions of this script could only recover the single exchange stored with the archive. v1.53 presses Mufy's own **Load** action for you to restore the full text, then switches each character's current chat back afterwards. Details (Chinese): [full guide, FAQ](README.zh-CN.full.md#常见问题).
+
 > **Unofficial project.** This repository is not affiliated with Mufy. It reads data available to your own logged-in account through the same web APIs used by the site. Site-side API changes may break the tool.
 >
 > **Privacy:** processing is local in your browser. Your exported conversations are not uploaded to this project's servers.
@@ -25,7 +27,8 @@ It also tries hard not to create false confidence. Real user reports have uncove
 - very large sessions hit browser memory or string-size limits;
 - a service-side migration leaves fewer messages than an API-reported total;
 - mobile browsers silently block later downloads in a batch;
-- an apparently successful partial export is actually incomplete.
+- an apparently successful partial export is actually incomplete;
+- saving an archive clears the original session, so an export silently shrinks to one exchange per archive (restored automatically since v1.53).
 
 When the tool can detect one of those cases, it reports it instead of silently pretending the backup is complete.
 
@@ -42,6 +45,7 @@ When the tool can detect one of those cases, it reports it instead of silently p
 | **Archive health check** | Check whether cards still resolve and whether conversation records are still present |
 | **Recovery helpers** | Recover conversations whose character card disappeared when you still have the relevant conversation keys |
 | **Huge-session split export** | Stream extremely large sessions into smaller files instead of loading the entire session into memory |
+| **Archive auto-restore** | When Mufy has already cleared an archived session, load the archive back to recover the full text, then restore your current chat (v1.53) |
 | **Cross-device use** | Desktop, iPhone/iPad, and Android workflows are documented and have been exercised by real users |
 
 ### Output formats
@@ -91,6 +95,7 @@ The important boundary is where that credential goes:
 - this project has no analytics backend for your archive;
 - exported conversations are generated locally;
 - no third-party runtime library is required for the core ZIP exporter;
+- it is **read-only by default**. The single exception is v1.53's optional auto-load, which uses Mufy's own Load and Save actions (the same requests as clicking the buttons yourself) and leaves one clearly labelled, deletable archive per affected character. It never deletes anything; untick the option for a fully read-only run;
 - source code is public so the behavior can be independently inspected.
 
 Do not trust a userscript merely because its author says it is safe. Review the source yourself, or have someone you trust review it before running it in an authenticated browser session.
@@ -108,7 +113,7 @@ The commit history deliberately records wrong assumptions and reversals as well 
 - Public since **August 6, 2026**.
 - Reached **181 GitHub stars in its first 24 days**.
 - Actively maintained from real user feedback.
-- Current userscript series: **v1.52** at the time this README was introduced.
+- Current userscript series: **v1.53**.
 - Licensed under **AGPL-3.0**.
 
 The repository is still young and the target site's APIs are not under this project's control. Breakage after site updates is possible; reports that include the visible error and the affected workflow are especially useful.

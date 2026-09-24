@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 批量导出聊天记录
 // @namespace    https://github.com/willwefind/mufy-batch-export
-// @version      1.52.0
+// @version      1.53.0
 // @description  一键把某个角色（或多个角色）的所有存档对话批量导出：打包成 ZIP、合并成一份 Markdown，或直接做成 EPUB 电子书；也能把整个「人设面具」库、和你自己创建的角色卡导出来；还能给全部角色做一次「体检」，一次性查出哪些卡没了、哪些记录空了
 // @author       Ciel
 // @license      AGPL-3.0-only
@@ -21,7 +21,9 @@
  *   2) 不想装插件：在 mufy 的聊天页面按 F12 打开控制台，把本文件整段粘进去回车，
  *      同样会出现那个按钮（关掉标签页就没了，下次再粘一遍）。
  *
- * 只读你自己的账号数据，不发任何东西出去；导出文件直接走浏览器下载。
+ * 只碰你自己的账号数据，不发任何东西到第三方；导出文件直接走浏览器下载。
+ * ⚠️ 唯一会「写」你 mufy 账号的是 v1.53 的「自动载入」（面板上可以取消勾选）：
+ *    存档只剩摘要时替你点「载入」，导完再把当前聊天切回去（会多一条备注写明可删的存档）。
  *
  * 🔞 面向成年用户。请勿向未成年人传播本工具或站点地址。
  */
@@ -36,7 +38,7 @@
   //    用户装好了新版，面板却还写着旧版号，于是所有人（包括我）都以为"更新没生效"，
   //    去查缓存、查装了两份、查扩展缓存，全查错了方向。**用户看到的版本号才是他的事实。**
   //    现在只留这一处，并且 make-public.py 会校验它和 @version 一致，不一致直接构建失败。
-  const VERSION = '1.52.0';
+  const VERSION = '1.53.0';
 
   // ---------- 基础工具 ----------
   const ORIGIN = location.origin;
@@ -85,7 +87,8 @@
   // tries：调用方可以压低重试次数。默认 4 次是给「导出」那条路的——它宁可多等也别少拿。
   // 但**探测**类的请求不一样：被删掉的卡是每次都 500（那是接口的答复，不是抖动），
   // 默认那套退避会为每一个被删的角色白等 7 秒，几百个角色的体检里这笔账很可观。
-  async function api(path, body, tries) {
+  // method：有 body 时默认 POST；改存档备注那一个接口要 PUT（跟 mufy 前端一致）。
+  async function api(path, body, tries, method) {
     const MAX = tries || 4;
     let last = '';
     for (let i = 0; i < MAX; i++) {
@@ -94,7 +97,7 @@
       try {
         const init = { headers: { Authorization: 'Bearer ' + t }, credentials: 'include' };
         if (body !== undefined) {
-          init.method = 'POST';
+          init.method = method || 'POST';
           init.headers['Content-Type'] = 'application/json';
           init.body = JSON.stringify(body);
         }
@@ -651,25 +654,53 @@
     let i = 0;
     for (const item of list) {
       i += 1;
-      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…${item.current ? '（你当前正在聊的对话，还没存档）' : ''}`);
-      const r = await getDialogs(item.sessionId, characterId);
+      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…` +
+        (item.current ? '（你当前正在聊的对话，还没存档）' : '') +
+        (item.viaLoad ? '（同一段的另一条存档）' : ''));
+      let r = item.viaLoad
+        ? { dialogs: [], expected: null, beyond: 0, earliest: '', incomplete: false, reason: '' }
+        : await getDialogs(item.sessionId, characterId);
+      // 🔴 v1.53 之前这里是**静默丢段**：存档列表捞进来的段，原会话早被 mufy 清空了（0 条），
+      //    然后被下面「一条消息都没有的段不出文件」过滤掉 —— 连摘要都不留、也不报。
+      //    现在跟主路径一样：先自动载入；载入不成再退回存档里那一问一答，并且说出来。
+      let loaded = false;
       if (!r.dialogs.length) {
+        const r2 = await loadIntoItem(characterId, item, list, i, opts, report, name, info.lastSessionId);
+        if (r2) { r = r2; loaded = r2.dialogs.length > 0; }
+      }
+      let dialogs = r.dialogs;
+      let fromArchiveOnly = false;
+      if (!dialogs.length && (item.archives || []).length) {
+        const a = item.archives[0];
+        dialogs = [
+          { role: 'user', content: a.user_content, createdTime: a.createdAt, __fromArchive: true },
+          { role: 'assistant', content: a.assistant_content, createdTime: a.createdAt, __fromArchive: true },
+        ];
+        fromArchiveOnly = true;
+        opts.stubCount = (opts.stubCount || 0) + 1;
+        (opts.stubList = opts.stubList || []).push({
+          name, when: String(a.createdAt || '').slice(0, 10),
+          remark: item.archives.map((x) => x.remark).filter(Boolean).join(' / '),
+        });
+        report('  🔴 只留下了存档摘要（一问一答）' + (opts.autoLoad ? '——自动载入也没救回来' : ''));
+      } else if (!dialogs.length) {
         report('  ⚠️ 这一段一条正文都没取到——对话 ID 填错了，或者这一段在 mufy 那边真的没了。');
       }
       if (r.incomplete) report(`  ⚠️ 不完整：${r.reason}`);
       sessions.push({
         sessionId: item.sessionId,
         isCurrent: !!item.current,
-        fromArchiveOnly: false,
+        fromArchiveOnly,
+        loadedFromArchive: loaded,
         archives: (item.archives || []).map((a) => ({
           archiveId: a.archiveId, remark: a.remark || '', createdAt: a.createdAt,
         })),
         error: r.incomplete ? r.reason : null,
         incomplete: !!r.incomplete,
         expectedCount: r.expected,
-        messageCount: r.dialogs.length,
+        messageCount: dialogs.length,
         earliest: r.earliest,
-        dialogs: r.dialogs,
+        dialogs,
       });
       await sleep(150);
     }
@@ -711,6 +742,114 @@
   async function getArchives(characterId) {
     const d = await api('/api/sessions/query_archives?characterId=' + encodeURIComponent(characterId));
     return Array.isArray(d) ? d : (d && d.data) || [];
+  }
+
+  // ---------- 自动「载入」存档 ----------
+  // 🔴 2026-09-24 查实：mufy 现在**存档之后，原来那段会话的正文就被清空了**，
+  //    正文只留在存档里。于是拿存档的 sourceSessionId 去问 dialogs/query 一律 0 条，
+  //    导出来只剩存档附带的那一问一答（她一个角色 16 段里 14 段都是这样）。
+  //    实测连前一天刚存的档都是 0 条 —— 不是「老了才清」，是存档这个动作本身。
+  //
+  //    mufy 自己的「载入」按钮走的是 POST /sessions/load {characterId, archiveId}：
+  //    服务器把这条存档**还原成一个新会话**、返回新的 sessionId。拿这个新 id 去问
+  //    dialogs/query 就是全文（实测：0 条 → 6 条、每条上万字）。存档本身不动、不删。
+  //
+  //    ⚠️ 代价：载入会把这个角色的「当前聊天」换成刚载入的那段（mufy 手动点载入也一样，
+  //    而且它不会替你保存当前那段）。所以每个角色导完要调 restoreCurrent 切回去。
+  async function loadArchive(characterId, archiveId) {
+    const sid = await api('/api/sessions/load', { characterId, archiveId });
+    if (typeof sid !== 'string' || !sid) throw new Error('载入存档没有返回新会话');
+    return sid;
+  }
+
+  // 第一次替某个角色载入之前，记下「导出前的当前聊天」—— 这个角色导完要切回去（restoreCurrent）
+  function noteMoved(opts, characterId, orig, name) {
+    opts._moved = opts._moved || new Map();
+    if (!opts._moved.has(characterId)) opts._moved.set(characterId, { orig: orig || null, name });
+  }
+
+  // 同一段存过好几次档：每条存档是存档那一刻的**独立快照**，内容可能不同，
+  // 所以逐条载入、各出一段（一字不差的会被指纹去重合并掉）。
+  // 做法：把第 2 条起拆成 viaLoad 项，插在 list 里当前项的后面（i = 当前项的 1 基序号）。
+  function splitSnapshots(item, list, i, report) {
+    if (item.viaLoad || !item.archives || item.archives.length < 2) return;
+    report(`  这一段存过 ${item.archives.length} 次档，每条都是独立快照，逐条载入。`);
+    list.splice(i, 0, ...item.archives.slice(1)
+      .map((a) => ({ sessionId: item.sessionId, archives: [a], viaLoad: true })));
+    item.archives = item.archives.slice(0, 1);
+  }
+
+  // 主路径（collectCharacter）和救援（collectBySessions）共用：
+  // 原会话一条都不给、手里有存档 → 载入 item.archives[0] → 抓全文。
+  // 返回 getDialogs 的结果；没勾自动载入 / 没有存档 / 载入失败 → null（调用方照旧退回摘要）。
+  // ⚠️ 拆开导不走这里：那条路要的是「边翻边出文件」，不能整段 getDialogs 进内存。
+  async function loadIntoItem(characterId, item, list, i, opts, report, name, orig) {
+    if (!opts.autoLoad || !item.archives || !item.archives.length) return null;
+    splitSnapshots(item, list, i, report);
+    try {
+      noteMoved(opts, characterId, orig, name);
+      const sid = await loadArchive(characterId, item.archives[0].archiveId);
+      const r = await getDialogs(sid, characterId);
+      if (r.dialogs.length) {
+        opts.loadedCount = (opts.loadedCount || 0) + 1;
+        report(`  🔓 原会话已经被 mufy 清空了，已自动「载入」这条存档还原全文：${r.dialogs.length} 条`);
+      } else {
+        report('  ⚠️ 自动载入了这条存档，但还原出来的会话也是空的');
+      }
+      return r;
+    } catch (e) {
+      report(`  ⚠️ 自动载入这条存档失败：${e.message}`);
+      return null;
+    }
+  }
+
+  // 把自动载入挪走的「当前聊天」切回原来那段。
+  // mufy 没有「把某段设为当前」的接口（打开带 sessionId 的聊天页也不改，实测过），
+  // 能改「当前」的只有载入 / 新建 / 发消息。所以办法是：
+  //   把原来那段**存成一条存档**（备注写明是导出工具存的）→ 再把它载入回来。
+  // 这样当前聊天的内容和导出前一模一样，而且顺手多了一份存档，不会丢东西。
+  // 实测（2026-09-24，找了个当前聊天只有开场两条的角色）：原来 2 条 → 切回来还是 2 条，当前聊天指针也回来了。
+  const RESTORE_REMARK = '导出工具·还原当前聊天时自动保存（可删）';
+  async function restoreCurrent(characterId, opts, report) {
+    const m = opts._moved && opts._moved.get(characterId);
+    if (!m) return;
+    opts._moved.delete(characterId);
+    const who = `【${m.name || characterId.slice(0, 8)}】`;
+    if (!m.orig) {
+      report(`  ↩ ${who}导出前没有「当前聊天」，现在 mufy 里停在最后载入的那条存档上。`);
+      return;
+    }
+    let n = 0;
+    try {
+      const d = await api(`/api/dialogs/query?sessionId=${encodeURIComponent(m.orig)}` +
+        `&characterId=${encodeURIComponent(characterId)}&pageNum=1&pageSize=1`);
+      n = (d && typeof d.total === 'number') ? d.total : ((d && d.data) || []).length;
+    } catch (e) { /* 读不到就当有内容，照样存一份，宁可多存 */ n = -1; }
+    if (n === 0) {
+      report(`  ↩ ${who}导出前的「当前聊天」是空的，就不切回了（mufy 里现在停在最后载入的那条存档上）。`);
+      return;
+    }
+    try {
+      // tries=1：存档不是幂等的，重试可能多存出一条一模一样的
+      const a = await api('/api/sessions/archive', { characterId, sessionId: m.orig }, 1);
+      const archiveId = typeof a === 'number' ? a : a && a.archiveId;
+      if (!archiveId) throw new Error('保存当前聊天没有返回存档编号');
+      try { await api('/api/sessions/archive', { archiveId, remark: RESTORE_REMARK }, 1, 'PUT'); } catch (e) { /* 备注写不上不要紧 */ }
+      const sid = await loadArchive(characterId, archiveId);
+      let back = null;
+      try {
+        const d = await api(`/api/dialogs/query?sessionId=${encodeURIComponent(sid)}` +
+          `&characterId=${encodeURIComponent(characterId)}&pageNum=1&pageSize=1`);
+        back = d && typeof d.total === 'number' ? d.total : null;
+      } catch (e) { /* 只是核对 */ }
+      report(`  ↩ ${who}已把 mufy 里的「当前聊天」切回导出前那段` +
+        (n > 0 && back !== null ? `（${n} 条 → ${back} 条${back === n ? '，一条不少' : ' ⚠️ 条数对不上，去 mufy 看一眼'}）` : '') +
+        `。存档列表里会多一条「${RESTORE_REMARK}」，想删随时删。`);
+    } catch (e) {
+      report(`  ⚠️ ${who}没能把「当前聊天」切回去：${e.message}`);
+      report(`     原来那段一个字都没丢，只是 mufy 里现在停在别的存档上。打开这个地址就能回到它、接着聊：`);
+      report(`     ${ORIGIN}/chat?roleId=${characterId}&sessionId=${m.orig}`);
+    }
   }
 
   // 拉一个 session 的全部消息（自动翻页）
@@ -1868,6 +2007,12 @@
     //    而同一个角色走「全部聊过的角色」却是有内容的。README 又恰好教人
     //    「失败了用手动填 ID 补一遍」，不补这里那句话就是错的。
     if (!liveSessionId && lastSessionId) liveSessionId = lastSessionId;
+    // 🔴 自动载入会把 lastSessionId 挪到刚载入的那段上。分批导时同一个角色要进来好几次，
+    //    第二批再读 lastSessionId 就会把「载入出来的副本」当成当前段多塞一段进列表，
+    //    后面的批次整体错一位（漏掉一段）。所以第一次进来时把它钉住，之后一律用钉住的。
+    opts._origLive = opts._origLive || new Map();
+    if (opts._origLive.has(characterId)) liveSessionId = opts._origLive.get(characterId);
+    else opts._origLive.set(characterId, liveSessionId || null);
     // 卡取不到这件事必须当场说 —— 它是「名字怎么变成一串 hex」和
     // 「为什么只导出了一部分」两个问题的共同答案，沉默着最坑人。
     // 卡取不到这件事必须当场说 —— 但要分清两种情况，它们的后果完全不同
@@ -1948,8 +2093,20 @@
     let acc = 0;              // 这一批已经攥在手里的正文字数
     for (const item of list) {
       i += 1;
-      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…${item.current ? '（你当前正在聊的对话，还没存档）' : ''}`);
-      const r = await getDialogs(item.sessionId, characterId);
+      report(`【${name}】(${i}/${list.length}) 抓取 ${item.sessionId.slice(0, 8)}…` +
+        (item.current ? '（你当前正在聊的对话，还没存档）' : '') +
+        (item.viaLoad ? '（同一段的另一条存档）' : ''));
+      // viaLoad：同一段存过好几次档时拆出来的「另一条存档」，原会话已经问过是空的，直接走载入
+      let r = item.viaLoad
+        ? { dialogs: [], expected: null, beyond: 0, earliest: '', incomplete: false, reason: '' }
+        : await getDialogs(item.sessionId, characterId);
+
+      // 🔓 接口一条都不给、但手里有存档 → 替她点「载入」（见 loadArchive 上面那段）
+      let loaded = false;
+      if (!r.dialogs.length) {
+        const r2 = await loadIntoItem(characterId, item, list, i, opts, report, name, liveSessionId);
+        if (r2) { r = r2; loaded = r2.dialogs.length > 0; }
+      }
       let dialogs = r.dialogs;
       let err = r.incomplete ? r.reason : null;
       // 接口报的总数是假的、我们又往后多翻出了东西 —— 这件事必须说一声，
@@ -2001,13 +2158,16 @@
           when: String(item.archives[0].createdAt || '').slice(0, 10),
           remark: item.archives.map((x) => x.remark).filter(Boolean).join(' / '),
         });
-        report(`  🔴 只拿到存档摘要（接口一条对话都没给），这段要去 mufy 里「载入」后重导`);
+        report(opts.autoLoad
+          ? `  🔴 自动载入也没救回来，只留下了存档摘要（一问一答）`
+          : `  🔴 只拿到存档摘要（接口一条对话都没给）——勾上「自动载入」再导一次就能拿到全文`);
       }
 
       sessions.push({
         sessionId: item.sessionId,
         isCurrent: !!item.current,
         fromArchiveOnly,
+        loadedFromArchive: loaded,   // 原会话被清空、靠自动载入还原出来的
         archives: item.archives.map((a) => ({
           archiveId: a.archiveId,
           remark: a.remark || '',
@@ -2230,6 +2390,9 @@
     L.push(`- session \`${s.sessionId}\``);
     if (s.archives.length) L.push(`- 存档时间：${new Date(s.archives[0].createdAt).toLocaleString('zh-CN')}`);
     else L.push('- ⚠️ 这段没有存档，是从「最后一次聊天」里直接捞出来的');
+    if (s.loadedFromArchive) {
+      L.push('- 🔓 mufy 存档之后会把原会话的正文清空，这一份是导出时**自动载入存档**还原出来的全文');
+    }
     if (s.mergedFrom && s.mergedFrom.length) {
       L.push(`- 🔁 另有 ${s.mergedFrom.length} 段内容与这一份**一字不差**，已合并（不再单独出文件）：` +
              s.mergedFrom.map((d) => `「${d.title}」\`${d.sessionId}\``).join('、'));
@@ -3116,6 +3279,12 @@ ${ncxpts.join('\n')}
         勾上会给它们各出一个只装开场白的包。<br>
         ⏳ <b>卡还在才拿得到</b>——作者一旦删卡或设为私密，开场白也跟着没了。
       </div>
+      <label id="mufyx-autoloadwrap"><input type="checkbox" id="mufyx-autoload" checked> 存档只剩摘要时，自动「载入」还原全文</label>
+      <div id="mufyx-autoloadtip" style="font-size:11.5px;color:#a79ecb;margin:2px 0 0">
+        mufy 现在<b>存档后会清空原会话</b>，不载入就只拿得到一问一答。勾上会替你逐条点「载入」。<br>
+        载入会临时换掉这个角色的「当前聊天」，<b>每个角色导完会自动切回去</b>
+        （原来那段会先存成一条备注为「导出工具…（可删）」的存档，再载入回来，一个字不丢）。
+      </div>
       <label id="mufyx-tidywrap"><input type="checkbox" id="mufyx-tidy" checked> 清理 think / 状态栏 HTML</label>
       <label><input type="checkbox" id="mufyx-json" checked> <span id="mufyx-jsonlabel">附带 JSON 完整备份</span></label>
       <div class="row">
@@ -3214,6 +3383,10 @@ ${ncxpts.join('\n')}
       // 分批也无从谈起（它切的就是段内）。一律藏掉，不留在那儿假装能用。
       $('mufyx-shapewrap').style.display = (isCheck || isSplit) ? 'none' : 'block';
       $('mufyx-tidywrap').style.display = isCheck ? 'none' : 'block';
+      // 自动载入只对导聊天记录的那几条路有意义（体检不导内容；面具和角色卡不是聊天记录）
+      const canLoad = ['current', 'live', 'chatted', 'followed', 'manual', 'rescue', 'bigsplit'].includes(scope);
+      $('mufyx-autoloadwrap').style.display = canLoad ? 'block' : 'none';
+      $('mufyx-autoloadtip').style.display = canLoad ? 'block' : 'none';
       // 「附带 JSON」在体检下换个说法：它决定的是要不要再下一份**机读的报告**
       $('mufyx-jsonlabel').textContent = isCheck ? '同时下一份 JSON 报告（机器可读）'
         : isSplit ? '每包另附一份 JSON 原文（一包一个）'
@@ -3381,6 +3554,8 @@ ${ncxpts.join('\n')}
       //    ⚠️ 这个开关要在**排序**这一步生效，不能只在渲染时把章节倒过来 ——
       //    否则分批导出时「书内正序、书与书之间倒序」，更乱。
       oldestFirst: shape === 'epub',
+      autoLoad: $('mufyx-autoload').checked,
+      _moved: new Map(),        // 自动载入挪过「当前聊天」的角色 → 导完切回（见 restoreCurrent）
     };
     const scope = $('mufyx-scope').value;
     opts.liveOnly = scope === 'live';   // 只导「正在聊的这一段」
@@ -3487,9 +3662,14 @@ ${ncxpts.join('\n')}
             if (await emit(pack, opts, ts2, report)) ok += 1;
           } catch (e) {
             report(`❌ 【${g.characterId.slice(0, 8)}】失败：${e.message}`);
+          } finally {
+            // 跟主路径一样：自动载入挪过「当前聊天」的，这个角色一导完就切回去
+            try { await restoreCurrent(g.characterId, opts, report); } catch (e) { /* 自己会报 */ }
           }
         }
         report(`救援完成：${ok} 个角色出了文件。`);
+        if (opts.loadedCount) report(`🔓 其中 ${opts.loadedCount} 段存档的原会话已被 mufy 清空，都已自动「载入」还原成全文。`);
+        if (opts.stubCount) report(`🔴 有 ${opts.stubCount} 段只留下了存档摘要（一问一答），日志上面逐段写了。`);
         reportFinish(report);
         return;
       }
@@ -3516,11 +3696,14 @@ ${ncxpts.join('\n')}
 
         // 段清单：存档 + 「最后聊的那一段」（后者常常没存过档，只走存档会漏）
         const segs = new Map();
+        const segArcs = new Map();          // sourceSessionId → 它的全部存档（自动载入要用）
+        const arcLabel = (a) => String(a.createdAt || '').slice(0, 10) + (a.remark ? ' ' + a.remark : '');
         try {
           for (const a of await getArchives(rid)) {
-            if (a.sourceSessionId && !segs.has(a.sourceSessionId)) {
-              segs.set(a.sourceSessionId, String(a.createdAt || '').slice(0, 10) + (a.remark ? ' ' + a.remark : ''));
-            }
+            if (!a.sourceSessionId) continue;
+            if (!segs.has(a.sourceSessionId)) segs.set(a.sourceSessionId, arcLabel(a));
+            if (!segArcs.has(a.sourceSessionId)) segArcs.set(a.sourceSessionId, []);
+            segArcs.get(a.sourceSessionId).push(a);
           }
         } catch (e) {
           report(`  ⚠️ 存档列表读不到（${e.message}），只能导「最后聊的那一段」。`);
@@ -3546,9 +3729,41 @@ ${ncxpts.join('\n')}
         R.push('');
 
         let segNo = 0, 出了几个文件 = 0;
-        for (const [sid, label] of segs) {
+        // 用队列而不是直接 for…of segs：存过档的段原会话被清空时，要就地换成「它的每条存档」
+        const queue = [...segs].map(([sid, label]) => ({ sid, label }));
+        for (let qi = 0; qi < queue.length; qi++) {
+          let { sid, label } = queue[qi];
+          // 🔓 v1.53：mufy 存档之后原会话被清空，这里以前会「取到 0 条、切成 0 包」，等于什么都没出。
+          //    先花一次请求探一下原会话是不是空的；空的就换成逐条载入它的存档（每条是独立快照）。
+          //    ⚠️ 不能用 getDialogs 探 —— 这条路要避开的正是「整段进内存」。
+          const arcs = segArcs.get(sid);
+          if (!queue[qi].arc && opts.autoLoad && arcs && arcs.length) {
+            let n = null;
+            try {
+              const d = await api(`/api/dialogs/query?sessionId=${encodeURIComponent(sid)}` +
+                `&characterId=${encodeURIComponent(rid)}&pageNum=1&pageSize=1`);
+              n = d && typeof d.total === 'number' ? d.total : ((d && d.data) || []).length;
+            } catch (e) { /* 探不到就照原样拆，别瞎换 */ }
+            if (n === 0) {
+              report(`── ${label}：原会话已经被 mufy 清空了，改为自动载入它的 ${arcs.length} 条存档再拆`);
+              queue.splice(qi, 1, ...arcs.map((a) => ({ sid, arc: a, label: arcLabel(a) + '（自动载入的存档）' })));
+              ({ label } = queue[qi]);
+            }
+          }
+          if (queue[qi].arc) {
+            try {
+              noteMoved(opts, rid, got0.lastSessionId, charName);
+              sid = await loadArchive(rid, queue[qi].arc.archiveId);
+              opts.loadedCount = (opts.loadedCount || 0) + 1;
+            } catch (e) {
+              report(`  ⚠️ 自动载入存档「${label}」失败：${e.message}`);
+              R.push(`── ${label}　🔴 自动载入失败：${e.message}`);
+              R.push('');
+              continue;
+            }
+          }
           segNo += 1;
-          report(`── 第 ${segNo}/${segs.size} 段　${sid.slice(0, 8)}…　${label}`);
+          report(`── 第 ${segNo}/${queue.length} 段　${sid.slice(0, 8)}…　${label}`);
           const info = { charName, characterId: rid, sessionId: sid, segNo, desc: false };
           const 本段文件 = [];
           const st = await streamSessionParts(sid, rid, partChars, async (msgs, partNo, from, to, chars, desc) => {
@@ -3621,7 +3836,7 @@ ${ncxpts.join('\n')}
         R.push('  这条路边抓边出文件，所以多大都导得出来。**内容一个字没删。**');
         download(`mufy_${stem}_${ts4}_拆包报告.txt`, R.join('\n'));
 
-        report(`拆完了：${segs.size} 段，共产出 ${出了几个文件 + 1} 个文件（含一份拆包报告）。`);
+        report(`拆完了：${segNo} 段，共产出 ${出了几个文件 + 1} 个文件（含一份拆包报告）。`);
         report('   ⚠️ 文件多，浏览器可能拦掉后面的自动下载——面板底部「⬇ 手动保存」能补存最近几个。');
         reportFinish(report);
         return;
@@ -4050,6 +4265,10 @@ ${ncxpts.join('\n')}
             report('   ↳ 内存不够。同样：把「每包最多多少段对话」填 20 再试。');
           }
           report('   已跳过，继续下一个。');
+        } finally {
+          // 🔴 放在 finally：这个角色导到一半出错，也得把「当前聊天」切回去。
+          //    每个角色导完就切，别攒到最后 —— 标签页中途被杀的话，最多只影响一个角色。
+          try { await restoreCurrent(t.id, opts, report); } catch (e) { /* restoreCurrent 自己会报 */ }
         }
         await sleep(400);
       }
@@ -4068,6 +4287,10 @@ ${ncxpts.join('\n')}
         }
       }
 
+      if (opts.loadedCount) {
+        report(`🔓 有 ${opts.loadedCount} 段存档的原会话已被 mufy 清空，都已自动「载入」还原成全文导出。`);
+      }
+
       // 只拿到存档摘要的那几段（1KB 的小文件），和上面的「没导完整」不是一回事：
       // 那边是抓了一半，这边是接口一条都不给。救法也完全不同，所以分开报。
       if (opts.stubCount) {
@@ -4075,8 +4298,12 @@ ${ncxpts.join('\n')}
         for (const it of opts.stubList || []) {
           report(`   · 【${it.name}】${it.when ? it.when + ' 那段' : ''}${it.remark ? '「' + it.remark + '」' : ''}`);
         }
-        report('   救法：去 mufy 里把这几个存档「载入」，让它变成当前正在聊的那段，');
-        report('   然后重新导出这个角色 —— 载入之后接口就给得出全文了。（用户实测有效。）');
+        if (opts.autoLoad) {
+          report('   这几段自动载入也没救回来（上面日志里有具体原因）。可以在 mufy 里手动「载入」试试，');
+          report('   然后重新导出这个角色。');
+        } else {
+          report('   救法：勾上面板里的「自动载入还原全文」，重新导出这个角色就行。');
+        }
         report('   （对应文件的开头和 00_目录.md 里也写了同样的话。）');
       }
 
@@ -4107,6 +4334,10 @@ ${ncxpts.join('\n')}
     } catch (e) {
       report('❌ ' + e.message);
     } finally {
+      // 兜底：走到这儿还有没切回的（比如登录态断了整批停下），能切的都切回去
+      for (const cid of [...opts._moved.keys()]) {
+        try { await restoreCurrent(cid, opts, report); } catch (e) { /* 自己会报 */ }
+      }
       goBtn.disabled = false;
       document.removeEventListener('visibilitychange', onVisibleReacquire);
       releaseWakeLock();
@@ -4117,6 +4348,8 @@ ${ncxpts.join('\n')}
   window.__mufyExporter = {
     open, collectCharacter, toMarkdown, toMarkdownOne, emit,
     getArchives, getDialogs, getCharacterList, hasChatted,
+    loadArchive, restoreCurrent,           // 自动载入那条路（v1.53）
+    run,                                   // 整条导出流程：拆开导那条路藏在里面，拿假面板才测得到
     // 体检那条路：buildCheckReport 是纯函数（rows 进、文本出），
     // 拿假 rows 就能在控制台直接验分组和结论，不用真去跑几百个角色。
     getFolders, getFolderCharacters, folderShortfallNote,
